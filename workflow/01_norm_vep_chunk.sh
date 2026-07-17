@@ -20,6 +20,7 @@ chunk="$(basename "$INPUT_VCF" .vcf.gz)"
 OUT_DIR="$OUTPUT_ROOT/data/annotated"
 LOG_DIR="$OUTPUT_ROOT/logs/annotation"
 NORM_VCF="$OUT_DIR/${chunk}.norm.vcf.gz"
+QC_VCF="$OUT_DIR/${chunk}.norm.qc.vcf.gz"
 OUT_VCF="$OUT_DIR/${chunk}.annot.vcf.gz"
 LOG="$LOG_DIR/${chunk}.log"
 mkdir -p "$OUT_DIR" "$LOG_DIR"
@@ -71,10 +72,36 @@ bcftools norm \
   "$INPUT_VCF"
 tabix -p vcf -f "$NORM_VCF"
 
+# --- 1b. Site + genotype QC (config-driven; between norm and VEP) ---
+echo "[$(date -Iseconds)] site + genotype QC"
+read KEEP_FILTER DP_MIN GQ_MIN AB_MIN AB_MAX SITE_MISS DROP_MONO \
+     <<< "$(python -c "
+import yaml
+q = yaml.safe_load(open('$CONFIG'))['qc']['site_gt']
+print(q['keep_filter'], q['genotype_dp_min'], q['genotype_gq_min'],
+      q['genotype_ab_het_min'], q['genotype_ab_het_max'],
+      q['site_missing_max'], str(q['drop_monoallelic_after_mask']).lower())
+")"
+GT_INCLUDE="$(python -c "
+from src.qc.site_gt_qc import genotype_mask_include_expr
+print(genotype_mask_include_expr($DP_MIN, $GQ_MIN, $AB_MIN, $AB_MAX))
+")"
+SITE_DROP="$(python -c "
+from src.qc.site_gt_qc import site_drop_expr
+print(site_drop_expr($SITE_MISS, ${DROP_MONO@Q} == 'true'))
+")"
+
+# view -f PASS  ->  +setGT to null low-quality genotypes  ->  drop sites failing site filters
+bcftools view -f "$KEEP_FILTER" "$NORM_VCF" \
+  | bcftools +setGT -- -t q -n . -i "$GT_INCLUDE" \
+  | bcftools +fill-tags -- -t AC,AN,F_MISSING \
+  | bcftools view -e "$SITE_DROP" -Oz -o "$QC_VCF"
+tabix -p vcf -f "$QC_VCF"
+
 # --- 2. VEP annotation ---
 echo "[$(date -Iseconds)] vep --fork $VEP_FORK"
 VEP_CMD=(vep
-  --input_file "$NORM_VCF"
+  --input_file "$QC_VCF"
   --output_file "$OUT_VCF"
   --vcf --compress_output bgzip
   --cache --offline
@@ -103,7 +130,7 @@ tabix -p vcf -f "$OUT_VCF"
 # --- 3. Validate ---
 python -m src.annotation.validate_chunk --input "$INPUT_VCF" --annotated "$OUT_VCF" --min-ratio 0.5
 
-# --- 4. Clean intermediate norm output (keep only annotated) ---
-rm -f "$NORM_VCF" "${NORM_VCF}.tbi"
+# --- 4. Clean intermediate norm + QC outputs (keep only annotated) ---
+rm -f "$NORM_VCF" "${NORM_VCF}.tbi" "$QC_VCF" "${QC_VCF}.tbi"
 
 echo "[$(date -Iseconds)] DONE $chunk"

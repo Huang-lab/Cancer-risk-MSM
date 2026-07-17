@@ -81,6 +81,37 @@ resources:
     root: /sc/arion/projects/rg_huangk06/tools/InterVar
     config: /sc/arion/projects/rg_huangk06/tools/InterVar/config.ini
 
+# --- QC (site/genotype and sample-level) -------------------------------------
+qc:
+  # Site + genotype QC (per chunk, applied between bcftools norm and VEP)
+  site_gt:
+    keep_filter: PASS               # keep only VQSR/GATK PASS sites
+    genotype_dp_min: 10             # null genotypes with DP<10
+    genotype_gq_min: 20             # null genotypes with GQ<20
+    genotype_ab_het_min: 0.20       # het ABmin: alt/(ref+alt) >= 0.20
+    genotype_ab_het_max: 0.80       # het ABmax: alt/(ref+alt) <= 0.80
+    site_missing_max: 0.10          # drop sites with >10% missing after masking
+    drop_monoallelic_after_mask: true
+
+  # Sample QC (one-shot pre-annotation; emits results/qc/sample_keep_list.tsv)
+  sample:
+    missingness_max: 0.05           # drop samples with >5% variant missingness
+    sex_check:
+      enabled: true
+      # inferred sex from WES / common-variants X chrom heterozygosity (from PLINK --check-sex)
+      # tolerated mismatch fraction: 0.0 (any mismatch -> flag)
+      check_source: common_variants/sex/plink_check_sex.sexcheck   # path relative to CV batch root
+      mismatch_action: flag         # "flag" | "exclude"
+    contamination:
+      enabled: false                # set true when a VerifyBamID2 summary is available
+      verifybamid_summary: null     # path to Ancestry|FREEMIX table (per-sample); >0.03 -> exclude
+      freemix_max: 0.03
+    kinship:
+      # from common_variants/.../kinship/kinship.tsv (KING-format; kinship coefficient)
+      duplicate_kin_min: 0.354      # >=0.354 -> monozygotic-twin/duplicate; keep one
+      pi_hat_related_max: 0.1875    # >= 2nd-degree; kept but flagged, ML uses cluster-CV
+      keep_strategy: highest_call_rate   # among duplicates, keep the sample with fewest missing
+
 # --- Classification thresholds ----------------------------------------------
 classification:
   scope: genome_wide               # annotate + classify all genes; panel is reporting only

@@ -15,6 +15,17 @@ bash workflow/00_setup_dirs.sh
 bash workflow/00_confirm_build.sh          # asserts GRCh38 + resource presence
 ```
 
+## 0b. Sample QC (produces the keep-list before annotation)
+
+```bash
+bash workflow/00_run_sample_qc.sh
+# review $OUTPUT_ROOT/results/qc/sample_qc_summary.md
+```
+
+Thresholds: `config.qc.sample.{missingness_max, sex_check, contamination, kinship}`.
+Outputs live under `$OUTPUT_ROOT/results/qc/` and are consumed by the carrier
+matrix step. Sample QC is idempotent — safe to rerun.
+
 ## 1. Step-1 gate: single chunk
 
 Runs ONE chunk end-to-end, then STOPS for review.
@@ -41,9 +52,11 @@ bash workflow/03_submit_array.lsf
 ```
 
 - Concurrency capped at `config.lsf.array_concurrency_cap` (default `%50`).
-- Each worker: `bcftools norm -m -any -f $FASTA` → `vep --fork N` with LOFTEE,
-  AlphaMissense, ClinVar (`--custom`), gnomAD AF (`--custom`), dbNSFP if present
-  → bgzip + tabix into `$OUTPUT_ROOT/data/annotated/`.
+- Each worker (in order): `bcftools norm -m -any -f $FASTA`  →  **site+GT QC**
+  (`bcftools view -f PASS` + `+setGT` null low-DP/GQ/het-AB genotypes + drop
+  sites with `F_MISSING>10%` or mono-allelic after masking)  →  `vep --fork N`
+  with LOFTEE, AlphaMissense, ClinVar (`--custom`), gnomAD AF (`--custom`),
+  dbNSFP if present → bgzip + tabix into `$OUTPUT_ROOT/data/annotated/`.
 - **Parallelism at two levels:**
   1. *Within a chunk:* `vep --fork N` runs N worker threads inside the single
      worker. LSF `-n N` matches so the slot reserves N cores.
