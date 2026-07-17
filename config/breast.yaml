@@ -1,0 +1,10 @@
+# Breast cancer ML config — cancer-specific overrides on top of config.yaml
+cancer: breast
+phecodes: ["CA_105.1"]
+focus_genes: [BRCA1, BRCA2, PALB2, ATM, CHEK2, TP53, PTEN, CDH1, STK11, NF1, BARD1, BRIP1, RAD51C, RAD51D]
+covariates_extra: [mammogram_ever, parity, age_at_first_birth, family_history_breast_1deg]
+sex_restrict: female
+matching:
+  ratio: 4
+  caliper: 0.2
+  covariates: [age, self_reported_race, PC1, PC2, PC3, PC4, PC5, parity]

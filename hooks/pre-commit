@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Block commits that add data files or MSM participant-ID patterns.
+# Install: git config core.hooksPath hooks
+set -euo pipefail
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+if [[ -z "$STAGED" ]]; then exit 0; fi
+
+DATA_RE='\.(vcf|bcf|bgen|bam|cram|bim|fam|psam|pvar|pgen|tsv|csv|txt|parquet|feather|h5|pkl)(\.gz)?$'
+BAD=$(echo "$STAGED" | grep -Ei "$DATA_RE" | grep -v '^tests/synthetic/' || true)
+if [[ -n "$BAD" ]]; then
+  echo "pre-commit: refusing to add data-shaped files (allowed only under tests/synthetic/):"
+  echo "$BAD"
+  exit 1
+fi
+
+ID_RE='SINAI_[0-9]+_[A-Z]{2}[0-9]+|SINAI-Million_[0-9]+_[0-9]+'
+PHI=$(echo "$STAGED" | xargs grep -lE "$ID_RE" 2>/dev/null || true)
+if [[ -n "$PHI" ]]; then
+  echo "pre-commit: SINAI participant-ID pattern found in staged files:"
+  echo "$PHI"
+  exit 1
+fi
+
+exit 0

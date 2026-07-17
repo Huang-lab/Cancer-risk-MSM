@@ -1,0 +1,17 @@
+name: msm-annotation
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - bcftools=1.19
+  - htslib=1.19
+  - samtools=1.19
+  - ensembl-vep=112
+  - tabix
+  - pyyaml
+  - pandas
+  - pip
+  # LOFTEE and AlphaMissense VEP plugins are installed under
+  # resources.loftee.plugin_dir / resources.alphamissense.plugin_dir on Minerva.
+  # ANNOVAR + InterVar are used from Minerva modules (not conda) for the ACMG track.

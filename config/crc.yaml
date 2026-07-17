@@ -1,0 +1,9 @@
+# Colorectal cancer ML config — cancer-specific overrides on top of config.yaml
+cancer: colorectal
+phecodes: ["CA_101.1", "CA_101.11"]   # confirm on cluster
+focus_genes: [APC, MLH1, MSH2, MSH6, PMS2, EPCAM, MUTYH, POLE, POLD1, SMAD4, BMPR1A, STK11, PTEN, TP53, CHEK2]
+covariates_extra: [colonoscopy_ever, family_history_crc_1deg]
+matching:
+  ratio: 4                # 4 controls per case
+  caliper: 0.2
+  covariates: [age, sex, self_reported_race, PC1, PC2, PC3, PC4, PC5]

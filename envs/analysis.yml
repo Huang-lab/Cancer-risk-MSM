@@ -1,0 +1,21 @@
+name: msm-analysis
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pandas=2.2.*
+  - numpy=1.26.*
+  - scipy=1.13.*
+  - scikit-learn=1.5.*
+  - statsmodels=0.14.*
+  - lifelines=0.28.*
+  - xgboost=2.0.*
+  - matplotlib
+  - seaborn
+  - pyyaml
+  - pyarrow
+  - pytest
+  - shap
+  - joblib
+  - tqdm

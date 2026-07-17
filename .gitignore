@@ -1,0 +1,92 @@
+# =============================================================================
+# Cancer-risk-MSM .gitignore — IRB-protected data must NEVER be committed.
+# Repo is code-only. Runtime data lives on Minerva under $OUTPUT_ROOT.
+# =============================================================================
+
+# --- Data / results / logs / references (Minerva-only) -----------------------
+data/
+results/
+resources/
+refs/
+logs/
+intermediate/
+scratch/
+
+# --- Bioinformatics data files (by extension, anywhere) ----------------------
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.gz.csi
+*.bcf
+*.bcf.csi
+*.bgen
+*.bgi
+*.sample
+*.bed
+*.bim
+*.fam
+*.psam
+*.pvar
+*.pgen
+*.cram
+*.cram.crai
+*.bam
+*.bam.bai
+*.fasta
+*.fa
+*.fai
+*.dict
+*.gvcf*
+
+# --- Data-shaped tabular files (whitelist synthetic fixtures below) ----------
+*.tsv
+*.csv
+*.txt
+*.tsv.gz
+*.csv.gz
+*.txt.gz
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+
+# --- Participant ID patterns (defense in depth) ------------------------------
+SINAI_*
+SINAI-Million_*
+
+# --- Whitelist: docs + synthetic test fixtures (fake data only) --------------
+!docs/**/*.md
+!README.md
+!README.txt
+!LICENSE
+!tests/synthetic/**
+!envs/**/*.yml
+!envs/**/*.yaml
+!config/**/*.yaml
+!config/**/*.yml
+!config/**/*.json.example
+
+# --- Envs, caches, editor cruft ----------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.env.*
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- LSF / job scheduler artifacts -------------------------------------------
+*.lsf.o*
+*.lsf.e*
+*.out
+*.err
+core.*

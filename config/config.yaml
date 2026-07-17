@@ -1,0 +1,184 @@
+# =============================================================================
+# Cancer-risk-MSM — single source of truth (paths + parameters, no data values)
+# All Minerva paths are placeholders/conventions. Fill/confirm on-cluster.
+# =============================================================================
+
+project:
+  name: Cancer-risk-MSM
+  reference_build: GRCh38          # asserted by 00_confirm_build.sh
+  output_root: /sc/arion/projects/rg_huangk06/variants_PLP_MSM
+
+# --- Inputs (immutable, read-only) -------------------------------------------
+inputs:
+  msm_data_root: /sc/arion/projects/MSM/data
+
+  wes:
+    # Auto-resolve highest batch under wes.pvcf_target_glob, or pin explicitly.
+    pvcf_target_glob: "WES/combined/batch_*/pVCF/Target"
+    batch: null                    # null -> auto-select highest batch_###
+    chunk_glob: "*.vcf.gz"
+    expected_chunks: 498           # sanity check; not enforced
+
+  common_variants:
+    root_glob: "common_variants/combined/batch_*"
+    batch: null                    # null -> auto-select highest
+    pca_file: "pca/pcs.tsv"        # path relative to batch root; contains ancestry PCs
+    kinship_file: "kinship/kinship.tsv"
+
+  phenotypes:
+    root_glob: "phenotypes/*"      # yyyy-mm-dd folders; picks latest by name
+    date: null                     # null -> latest date folder
+    files:
+      phecodex:            "PheWas_MSM_phecodeX.tsv"
+      encounter_diagnosis: "Encounter_Diagnosis.txt"      # ICD-coded
+      problem_list:        "Problem_List.txt"             # ICD-coded
+      medical_history:     "Medical_History.txt"
+      surgical_history:    "Surgical_History.txt"
+      family_history:      "Family_History.txt"
+      demographics:        "Demographics.txt"
+      social_history:      "Social_History.txt"
+      vitals:              "Vitals.txt"
+      ob_history:          "OB_HISTORY.txt"
+      health_maintenance_glob: "HEALTH_MAINTENANCE_*.txt"
+
+# --- Reference resources (Minerva paths — reuse BioMe staging if present) ----
+resources:
+  fasta: /sc/arion/projects/rg_huangk06/refs/GRCh38/GRCh38.primary_assembly.genome.fa
+  vep:
+    cache_dir: /sc/arion/projects/rg_huangk06/refs/vep/cache
+    cache_version: 112             # confirm on cluster
+    assembly: GRCh38
+    species: homo_sapiens
+    fork: 4                        # threads per chunk (matches LSF -n)
+  loftee:
+    plugin_dir: /sc/arion/projects/rg_huangk06/refs/vep/plugins/loftee
+    human_ancestor_fa: /sc/arion/projects/rg_huangk06/refs/loftee/human_ancestor.fa.gz
+    conservation_file: /sc/arion/projects/rg_huangk06/refs/loftee/loftee.sql
+  alphamissense:
+    plugin_dir: /sc/arion/projects/rg_huangk06/refs/vep/plugins/alphamissense
+    scores_tsv_gz: /sc/arion/projects/rg_huangk06/refs/alphamissense/AlphaMissense_hg38.tsv.gz
+    # Chen/Pejaver gene-specific evidence-label calibration table (mirrors
+    # Huang-lab/Biome-alphamissense-calibration). TSV: gene, threshold, evidence_label.
+    calibration_table: /sc/arion/projects/rg_huangk06/refs/alphamissense/gene_calibration.tsv
+  clinvar:
+    # Auto-resolve latest dated release folder (e.g. clinvar/2026-07-01/).
+    root: /sc/arion/projects/rg_huangk06/refs/clinvar
+    release: latest                # "latest" -> pick newest yyyy-mm-dd subdir
+    vcf_basename: "clinvar.vcf.gz"
+    fields: [CLNSIG, CLNREVSTAT, CLNDN, CLNVI]
+  gnomad:
+    vcf: /sc/arion/projects/rg_huangk06/refs/gnomad/v4/gnomad.exomes.v4.sites.vcf.bgz
+    af_field: AF                   # for --custom AF annotation
+    popmax_field: AF_popmax
+  dbnsfp:
+    tsv_gz: /sc/arion/projects/rg_huangk06/refs/dbnsfp/dbNSFP4.7a.txt.gz   # optional
+  # ANNOVAR + InterVar for the ACMG track (referenced, not vendored)
+  annovar:
+    root: /sc/arion/projects/rg_huangk06/tools/annovar
+    humandb: /sc/arion/projects/rg_huangk06/refs/annovar/humandb
+    buildver: hg38
+  intervar:
+    root: /sc/arion/projects/rg_huangk06/tools/InterVar
+    config: /sc/arion/projects/rg_huangk06/tools/InterVar/config.ini
+
+# --- Classification thresholds ----------------------------------------------
+classification:
+  scope: genome_wide               # annotate + classify all genes; panel is reporting only
+  clinvar:
+    plp_terms:     ["Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"]
+    blb_terms:     ["Benign", "Likely_benign", "Benign/Likely_benign"]
+    min_review_stars: 2            # >= 2 gold stars (criteria_provided_multiple_submitters or better)
+  acmg:
+    # ANNOVAR+InterVar rule-based P/LP; then remove any variant ClinVar calls B/LB.
+    remove_if_clinvar_blb: true
+    pm2_af_max: 0.0001             # ~AF<=1e-4 popmax by default
+    pvs1_lof_gene_list: null       # optional path to LoF-intolerant gene list (defaults to InterVar's)
+  alphamissense:
+    strategy: gene_specific_only   # per user: mirror Biome-alphamissense-calibration
+    min_evidence_strength: Moderate    # PP3_Moderate or stronger promotes; Supporting does NOT
+    record_domain_aggregate: true       # recorded, never promotes carrier
+  qc:
+    paralog_genes: [PMS2, PMS2CL, CHEK2, NBN, SDHA]  # extra artifact scrutiny
+    gnomad_inflation_ratio_max: 10.0                 # flag genes with cohort/gnomAD carrier freq >10x
+
+# --- Focus gene panel (reporting/QC only; annotation is genome-wide) ---------
+gene_panels:
+  cancer_predisposition_28:
+    # Placeholder: user to confirm exact list from prior BioMe work.
+    # Common cancer-predisposition genes as a starting reporting panel.
+    genes:
+      - APC
+      - ATM
+      - BARD1
+      - BMPR1A
+      - BRCA1
+      - BRCA2
+      - BRIP1
+      - CDH1
+      - CDK4
+      - CDKN2A
+      - CHEK2
+      - EPCAM
+      - MLH1
+      - MSH2
+      - MSH6
+      - MUTYH
+      - NBN
+      - NF1
+      - PALB2
+      - PMS2
+      - POLD1
+      - POLE
+      - PTEN
+      - RAD51C
+      - RAD51D
+      - SMAD4
+      - STK11
+      - TP53
+
+# --- LSF / execution --------------------------------------------------------
+lsf:
+  queue: premium
+  project: acc_MSM                 # confirm on cluster
+  walltime: "24:00"
+  memory_mb: 16000                 # per slot; scaled by -n = vep.fork
+  array_concurrency_cap: 50        # bsub -J "vep[1-N]%50"
+  modules:                          # Lmod modules to load in workers
+    - bcftools/1.19
+    - htslib/1.19
+    - samtools/1.19
+    - ensembl-vep/112
+    - annovar/2020Jun08
+    - python/3.11
+
+# --- Phenotyping ------------------------------------------------------------
+phenotype:
+  icd_to_phecodex_map: /sc/arion/projects/rg_huangk06/refs/phecodeX/icd_to_phecodeX.tsv
+  cancer_phecodes:
+    colorectal: ["CA_101.1", "CA_101.11"]     # confirm phecodeX codes on cluster
+    breast:     ["CA_105.1"]
+  case_definition:
+    require_incident: true          # exclude prevalent cases from ML
+    min_encounters_case:  1
+    min_encounters_control: 2       # >=2 healthcare encounters, none cancer-coded
+  famhx:
+    cancer_conditions: ["CANCER", "MALIGNANT_NEOPLASM"]
+    relative_degrees: [1]           # first-degree relatives
+
+# --- Carrier matrix ---------------------------------------------------------
+carriers:
+  format: long                      # per user: one row per variant x person
+  columns: [chr, pos, ref, alt, gene, person_id, is_clinvar_PLP, is_acmg_PLP, is_AM_PLP]
+  carrier_definition: any_alt       # >=1 qualifying allele
+  emit_wide_pivot: true             # also emit sample x gene wide matrix for ML
+
+# --- ML ---------------------------------------------------------------------
+ml:
+  cancers: [colorectal, breast]     # add cancers by dropping a YAML in config/
+  matching: propensity_kto1
+  temporal_leakage:
+    feature_window_days: [-730, -182]   # pre-index [730, 182] days
+  covariates: [age, sex, self_reported_race, PC1..PC10, bmi, smoking, alcohol]
+  models: [penalized_logistic, cox, random_forest, xgboost]
+  cv: stratified_group_kfold
+  n_splits: 5
