@@ -13,18 +13,12 @@ export CONFIG=config/config.yaml
 export OUTPUT_ROOT=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['project']['output_root'])")
 bash workflow/00_setup_dirs.sh
 bash workflow/00_confirm_build.sh          # asserts GRCh38 + resource presence
+bash workflow/00_download_refs.sh          # fetch fresh ClinVar VCF from NCBI
 ```
 
-## 0b. Sample QC (produces the keep-list before annotation)
-
-```bash
-bash workflow/00_run_sample_qc.sh
-# review $OUTPUT_ROOT/results/qc/sample_qc_summary.md
-```
-
-Thresholds: `config.qc.sample.{missingness_max, sex_check, contamination, kinship}`.
-Outputs live under `$OUTPUT_ROOT/results/qc/` and are consumed by the carrier
-matrix step. Sample QC is idempotent — safe to rerun.
+`00_download_refs.sh` stages `clinvar.vcf.gz` into
+`$OUTPUT_ROOT/resources/clinvar/YYYY-MM-DD/` (release date parsed from the
+header). `config.resources.clinvar.release: latest` then auto-selects it.
 
 ## 1. Step-1 gate: single chunk
 
@@ -72,6 +66,19 @@ bjobs -A                       # array status
 grep -c '^DONE' $OUTPUT_ROOT/logs/annotation/*.log
 ls $OUTPUT_ROOT/data/annotated/*.annot.vcf.gz | wc -l
 ```
+
+## 3. Sample QC from the annotated VCFs (post-annotation)
+
+```bash
+bash workflow/00_run_sample_qc.sh        # submits per-chunk bcftools stats array
+# when the array is DONE:
+bash workflow/00_wes_qc_aggregate.sh     # aggregate + plink2 kinship + sex-check + keep-list
+```
+
+Thresholds live in `config.qc.sample`. Outputs land in
+`$OUTPUT_ROOT/results/qc/` (`sample_keep_list.tsv`, `sample_qc_report.tsv`,
+`sample_qc_summary.md`, `psc_agg.tsv`, `king.*`, `sexcheck.sexcheck`,
+`wes_pca.eigenvec`). Idempotent — safe to rerun.
 
 ## Resources referenced (from config.resources)
 

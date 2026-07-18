@@ -93,22 +93,40 @@ qc:
     site_missing_max: 0.10          # drop sites with >10% missing after masking
     drop_monoallelic_after_mask: true
 
-  # Sample QC (one-shot pre-annotation; emits results/qc/sample_keep_list.tsv)
+  # Sample QC (computed FROM THE VCFs, post-site/GT QC; emits sample_keep_list.tsv)
   sample:
+    # 1. Missingness — aggregated per-sample from bcftools stats PSC lines.
     missingness_max: 0.05           # drop samples with >5% variant missingness
+
+    # 2. Sex-check — plink2 --check-sex F-stat on chrX non-PAR extracted from WES.
+    #    Reported sex read from phenotypes.demographics; F-stat thresholds below.
     sex_check:
       enabled: true
-      # inferred sex from WES / common-variants X chrom heterozygosity (from PLINK --check-sex)
-      # tolerated mismatch fraction: 0.0 (any mismatch -> flag)
-      check_source: common_variants/sex/plink_check_sex.sexcheck   # path relative to CV batch root
+      f_stat_female_max: 0.20       # F < 0.20 -> female
+      f_stat_male_min: 0.80         # F > 0.80 -> male
       mismatch_action: flag         # "flag" | "exclude"
-    contamination:
-      enabled: false                # set true when a VerifyBamID2 summary is available
-      verifybamid_summary: null     # path to Ancestry|FREEMIX table (per-sample); >0.03 -> exclude
+
+    # 3. Contamination — het/hom outlier as a VCF-only proxy (no BAM/CRAM needed).
+    #    True contamination scoring (VerifyBamID2) requires BAMs and is optional.
+    contamination_proxy:
+      het_hom_z_max: 4.0            # |z| > 4 over cohort het/hom distribution -> flag
+    contamination_verifybamid:
+      enabled: false                # set true if a VerifyBamID2 summary is on cluster
+      verifybamid_summary: null
       freemix_max: 0.03
+
+    # 4. Kinship — plink2 --make-king on autosomal, LD-pruned, MAF>0.01 variants
+    #    extracted from the annotated WES VCFs (self-contained, VCF-only).
     kinship:
-      # from common_variants/.../kinship/kinship.tsv (KING-format; kinship coefficient)
-      duplicate_kin_min: 0.354      # >=0.354 -> monozygotic-twin/duplicate; keep one
+      wes_kinship_inputs:
+        maf_min: 0.01
+        geno_max: 0.05
+        hwe_p_min: 1.0e-10
+        ld_window_kb: 500
+        ld_step: 50
+        ld_r2_max: 0.2
+        threads: 16
+      duplicate_kin_min: 0.354      # >=0.354 -> MZ-twin / duplicate; keep one
       pi_hat_related_max: 0.1875    # >= 2nd-degree; kept but flagged, ML uses cluster-CV
       keep_strategy: highest_call_rate   # among duplicates, keep the sample with fewest missing
 

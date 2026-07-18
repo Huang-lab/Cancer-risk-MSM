@@ -1,25 +1,26 @@
-"""Sample-level QC — produces $OUTPUT_ROOT/results/qc/sample_keep_list.tsv.
+"""Sample-level QC — build $OUTPUT_ROOT/results/qc/sample_keep_list.tsv from
+stats computed directly on the annotated WES VCFs.
 
-Runs once, before annotation. Uses the biobank's existing common-variants
-kinship + PCA + PLINK sex-check outputs (paths in config.inputs.common_variants
-and config.qc.sample.*) so we do not have to re-compute anything expensive.
+Inputs (all produced by workflow/00_wes_qc_*.sh, from VCFs):
+    - $OUTPUT_ROOT/results/qc/psc_agg.tsv        (aggregated bcftools PSC stats)
+    - $OUTPUT_ROOT/results/qc/king.kin0          (plink2 --make-king output)
+    - $OUTPUT_ROOT/results/qc/sexcheck.sexcheck  (plink2 --check-sex output)
+    - $OUTPUT_ROOT/results/qc/reported_sex.tsv   (person_id, reported_sex)
 
-Checks
-------
-1. Missingness      -> per-sample variant missingness <= qc.sample.missingness_max.
-2. Sex check        -> reported sex matches PLINK --check-sex inferred sex.
-3. Contamination    -> VerifyBamID2 FREEMIX <= qc.sample.contamination.freemix_max.
-4. Kinship          -> for pairs with kinship >= duplicate_kin_min, keep one
-                       (highest call rate); flag but keep <2nd-degree relatives.
+Checks (thresholds from config.qc.sample):
+  1. Missingness   -> from PSC (n_missing / n_total).
+  2. Het/hom ratio -> from PSC; flag samples with |z-score| > het_hom_z_max
+                       (weak contamination proxy usable without BAM/CRAM).
+  3. Sex-check     -> from plink2 --check-sex F-stat; mismatch_action = flag|exclude.
+  4. Kinship       -> from plink2 --make-king. For pairs with kinship >=
+                       duplicate_kin_min, keep the sample with the lower
+                       missingness; related pairs (>= pi_hat_related_max) kept
+                       but flagged; ML uses group-aware CV downstream.
 
-Outputs
--------
-- results/qc/sample_keep_list.tsv        : one row per KEPT sample_id.
-- results/qc/sample_qc_report.tsv        : per-sample flags (kept + dropped + reasons).
-- results/qc/sample_qc_summary.md        : counts (never per-sample values).
-
-PHI: sample IDs live in the tsvs, which are gitignored (results/**). Never
-logged at INFO — only counts and reasons.
+Outputs (all gitignored; on Minerva only):
+    - sample_keep_list.tsv        one row per KEPT sample_id
+    - sample_qc_report.tsv        per-sample flags + reasons
+    - sample_qc_summary.md        aggregate counts (no per-sample values)
 """
 from __future__ import annotations
 
@@ -30,16 +31,19 @@ from dataclasses import dataclass
 class SampleQcRow:
     sample_id: str
     call_rate: float | None
+    het_hom: float | None
     sex_reported: str | None
     sex_inferred: str | None
     sex_mismatch: bool
-    freemix: float | None
     kinship_flag: str          # "" | "duplicate_dropped" | "duplicate_kept" | "related_kept"
     kept: bool
     reasons: str               # comma-separated failed checks
 
 
-# --- Building blocks --------------------------------------------------------
+# --- Building blocks (unit-testable) ---------------------------------------
+
+def missingness_fail(missingness: float, missingness_max: float) -> bool:
+    return missingness > missingness_max
 
 
 def sex_mismatch(reported: str | None, inferred: str | None) -> bool:
@@ -50,8 +54,22 @@ def sex_mismatch(reported: str | None, inferred: str | None) -> bool:
     return r in ("M", "F") and i in ("M", "F") and r != i
 
 
-def contamination_fail(freemix: float | None, freemix_max: float) -> bool:
-    return freemix is not None and freemix > freemix_max
+def sex_from_f_stat(f_stat: float, female_max: float, male_min: float) -> str | None:
+    """plink2 F-stat convention: F<female_max -> Female; F>male_min -> Male."""
+    if f_stat < female_max:
+        return "F"
+    if f_stat > male_min:
+        return "M"
+    return None                            # ambiguous
+
+
+def het_hom_outlier(sample_ratio: float, cohort_mean: float,
+                    cohort_sd: float, z_max: float) -> bool:
+    """Contamination proxy: excess het vs cohort. Requires cohort_sd > 0."""
+    if cohort_sd <= 0:
+        return False
+    z = (sample_ratio - cohort_mean) / cohort_sd
+    return abs(z) > z_max
 
 
 def is_duplicate(kinship: float, duplicate_min: float) -> bool:
@@ -59,14 +77,49 @@ def is_duplicate(kinship: float, duplicate_min: float) -> bool:
 
 
 def pick_from_duplicate_cluster(cluster: list[SampleQcRow], strategy: str) -> str:
-    """Return the sample_id to KEEP from a set of duplicate/MZ-twin samples."""
+    """Return sample_id to KEEP within a duplicate/MZ-twin cluster."""
     if strategy == "highest_call_rate":
         return max(cluster, key=lambda r: (r.call_rate or 0.0)).sample_id
     return cluster[0].sample_id
 
 
-# TODO(minerva): implement:
-#   load_missingness(cfg) -> dict[sample_id -> call_rate]
-#   load_sex_check(cfg)   -> dict[sample_id -> (reported, inferred)]
-#   load_kinship(cfg)     -> list[(id_a, id_b, kinship)]
-#   run(cfg) -> writes results/qc/sample_keep_list.tsv and reports.
+# --- Cluster building from pairwise kinship ---------------------------------
+
+def build_duplicate_clusters(pairs: list[tuple[str, str, float]],
+                             duplicate_min: float) -> list[set[str]]:
+    """Union-find over duplicate pairs (kinship >= duplicate_min).
+
+    Returns connected components (clusters of samples that are all mutually
+    or transitively duplicates).
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent.get(x, x), parent.get(x, x))
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    nodes: set[str] = set()
+    for a, b, k in pairs:
+        if k < duplicate_min:
+            continue
+        parent.setdefault(a, a)
+        parent.setdefault(b, b)
+        nodes.add(a); nodes.add(b)
+        union(a, b)
+
+    comps: dict[str, set[str]] = {}
+    for n in nodes:
+        r = find(n)
+        comps.setdefault(r, set()).add(n)
+    return [c for c in comps.values() if len(c) > 1]
+
+
+# TODO(minerva): run(cfg) — reads psc_agg.tsv, king.kin0, sexcheck.sexcheck,
+# reported_sex.tsv; applies the checks above; writes the three output files.

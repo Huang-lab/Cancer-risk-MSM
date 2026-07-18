@@ -18,36 +18,141 @@ for methodology and config style.
 ## Workflow overview
 
 ```
-                       ┌─────────────────────────────────┐
-Pre-flight  ─────────► │ 00_setup_dirs  00_confirm_build │
-                       └───────────────┬─────────────────┘
-                                       │
-Step 0: Sample QC  ──────►  00_run_sample_qc.sh  ──►  sample_keep_list.tsv
-                                       │
-Step 1: Annotation ──────► [ 02_submit_single.lsf → REVIEW → 03_submit_array.lsf ]
-        per chunk:        bcftools norm → SITE+GT QC → VEP (all annotations)
-                                       │
-Step 2: Classification (3 in parallel)  ──►  clinvar_plp / acmg_plp / am_plp
-                                       │
-Step 3: Carrier matrix (long format)   ──►  carriers.long.tsv
-                                       │
-Step 4: Phenotype + covariates         ──►  cases / famhx / covariates
-                                       │
-Step 5: Analysis-ready join            ──►  analysis_ready.tsv
-                                       │
-Step 6: ML per cancer                  ──►  model / metrics / SHAP / calibration
+                       ┌──────────────────────────────────────────┐
+Pre-flight  ─────────► │ 00_setup_dirs  00_confirm_build          │
+                       │ 00_download_refs  (fresh ClinVar VCF)    │
+                       └──────────────────┬───────────────────────┘
+                                          │
+Step 1: Annotation (chunk parallel)       │
+   per chunk: bcftools norm → SITE+GT QC → VEP
+              (VEP --custom attaches CLNSIG/CLNREVSTAT/CLNDN/CLNVI
+               from the downloaded ClinVar VCF, plus AlphaMissense,
+               LOFTEE, gnomAD)
+                                          │
+Step 2: Sample QC FROM VCFs               │
+   bcftools stats per chunk → aggregate PSC
+   plink2 --make-king (kinship) + --check-sex on WES
+   → sample_keep_list.tsv
+                                          │
+Step 3: Classification (3 frameworks)     │
+   ClinVar P/LP · ACMG (ANNOVAR+InterVar, drop ClinVar B/LB) · AlphaMissense
+                                          │
+Step 4: Carrier matrix (long format)      │
+   one row per variant × person; is_clinvar_PLP · is_acmg_PLP · is_AM_PLP
+                                          │
+Step 5: Phenotype + covariates            │
+   phecodeX roster + ICD→phecodeX first-dx dates · famhx · covariates
+                                          │
+Step 6: Analysis-ready join               │
+                                          │
+Step 7: ML per cancer                     │
+   propensity match · temporal-leakage window · penalized logistic / Cox /
+   RF / XGBoost · ancestry-stratified evaluation · cross-cohort validation
 ```
 
-The **only phase runnable today** is Steps 0 + 1 (sample QC → annotation) via
-the LSF scripts under `workflow/`. Steps 2–6 are scaffolded (structure and
-config-plumbing in place, per-cluster implementation pending). This is
-intentional: run and review annotation first, then unlock downstream stages.
+Steps **runnable today**: 1 (annotation) and 2 (VCF-based sample QC). Steps
+3–7 are scaffolded and unlock after annotation completes.
+
+---
+
+## QC design
+
+QC runs at **two levels**, both computed from our data (no reliance on the
+biobank's common-variants outputs):
+
+### Site + genotype QC — per chunk, between `bcftools norm` and VEP
+
+Applied inside `workflow/01_norm_vep_chunk.sh` so annotation only sees clean
+data. Config keys under `qc.site_gt`:
+
+- `bcftools view -f PASS` — keep VQSR/GATK PASS sites only.
+- `bcftools +setGT` nulls genotypes when any of:
+  - `FMT/DP < genotype_dp_min` (default 10)
+  - `FMT/GQ < genotype_gq_min` (default 20)
+  - het call with allele balance outside `[genotype_ab_het_min, genotype_ab_het_max]` (default `[0.20, 0.80]`)
+- `bcftools +fill-tags` recomputes AC, AN, F_MISSING.
+- `bcftools view -e ...` drops sites with `F_MISSING > site_missing_max` (default 10%)
+  or sites that became mono-allelic after masking.
+
+Helper expressions live in `src/qc/site_gt_qc.py` and are unit-tested.
+
+### Sample QC — computed *from the annotated WES VCFs* (post site/GT QC)
+
+Runs after Step 1. Two-phase, both under `workflow/`:
+
+**Phase A — per-chunk stats (LSF array):** `workflow/00_wes_qc_chunks.lsf`
+runs `bcftools stats -s -` on each annotated chunk, writing
+`results/qc/stats/<chunk>.stats.txt`. Resume-safe.
+
+**Phase B — aggregate + kinship + sex-check + keep-list:**
+`workflow/00_wes_qc_aggregate.sh` chains three LSF jobs:
+1. Aggregate `PSC` lines across chunks → `results/qc/psc_agg.tsv`
+   (per-sample n_called, n_missing, missingness, het/hom, singletons).
+2. **Kinship**: `bcftools concat` autosomal chunks → `plink2 --maf 0.01
+   --geno 0.05 --hwe 1e-10 --indep-pairwise 500kb 50 0.2` → `plink2 --make-king
+   triangle bin` on the LD-pruned bfile → `results/qc/king.king` (+ `.kin0`).
+   Bonus: `plink2 --pca 20` on the same set gives WES-derived ancestry PCs.
+3. **Sex-check**: `bcftools view -r chrX` → concat → `plink2 --split-par b38
+   --check-sex 0.20 0.80` → `results/qc/sexcheck.sexcheck` (X het F-stat).
+4. Once (2) and (3) finish (`bsub -w done(...)`), `src.qc.sample_qc` reads
+   all four tables and emits:
+   - `results/qc/sample_keep_list.tsv` — rows to KEEP (feeds Step 4 carrier).
+   - `results/qc/sample_qc_report.tsv` — per-sample flags + reasons.
+   - `results/qc/sample_qc_summary.md` — aggregate counts (no per-sample values).
+
+**Config keys** (`qc.sample`):
+
+| Check                 | Threshold                                | Source (VCF-derived)                    |
+|-----------------------|------------------------------------------|-----------------------------------------|
+| Missingness           | `missingness_max` (default 0.05)         | `bcftools stats -s -` PSC               |
+| Contamination (proxy) | het/hom `|z| > het_hom_z_max` (default 4)| `bcftools stats -s -` PSC               |
+| Sex-check             | F<`f_stat_female_max`, F>`f_stat_male_min`; `mismatch_action` = flag \| exclude | `plink2 --check-sex` on chrX |
+| Kinship duplicate     | `duplicate_kin_min` (default 0.354)      | `plink2 --make-king`                    |
+| Kinship related       | `pi_hat_related_max` (default 0.1875) — flagged, kept | `plink2 --make-king`         |
+
+**Trade-off worth naming:** WES-based kinship is inherently rougher than
+array-common-variants kinship (fewer LD-pruned markers, more depth-dependent
+noise). Duplicate/MZ-twin calls at kinship ≥ 0.354 remain robust; 2nd-degree
+calls are less certain but only used to flag+keep with group-aware CV in the
+ML stage, not to exclude. True contamination scoring (VerifyBamID2) needs
+BAM/CRAM and is optional (`qc.sample.contamination_verifybamid.enabled`).
+
+---
+
+## ClinVar handling
+
+VEP annotation uses the **freshly-downloaded weekly ClinVar VCF**. There is no
+"look up in a static bundled table" — every run against a new download re-
+annotates against the current release.
+
+**Fetch:**
+```bash
+bash workflow/00_download_refs.sh
+```
+This wgets `clinvar.vcf.gz` from `ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/`,
+verifies md5, parses `##fileDate=` from the header, and stages the file into
+`$OUTPUT_ROOT/resources/clinvar/YYYY-MM-DD/`. It also brings down the
+NCBI-published tabix index (or builds one if that is missing).
+
+**Annotate:** VEP's `--custom` mechanism, invoked in `01_norm_vep_chunk.sh`,
+reads the downloaded VCF at each variant site and attaches
+`CLNSIG, CLNREVSTAT, CLNDN, CLNVI` to the CSQ record. That is the annotation —
+`--custom` is exactly "for each site, look it up in this VCF and copy these
+fields", so the output annotated VCFs carry the ClinVar release we downloaded.
+
+**Config:** `config.resources.clinvar.release: latest` — the loader picks the
+newest dated folder under `resources/clinvar/`, so a fresh download becomes
+the default with no config edit.
+
+**ACMG track (parallel):** for `src/classification/acmg.py`, ANNOVAR uses its
+own `clinvar_latest` protocol against `resources.annovar.humandb`. Refresh that
+periodically with ANNOVAR's `annotate_variation.pl -downdb clinvar_latest`.
 
 ---
 
 ## Step-by-step (on Minerva)
 
-### Pre-flight — one-time setup
+### Pre-flight
 
 ```bash
 git clone <this repo> && cd Cancer-risk-MSM
@@ -56,85 +161,47 @@ export CONFIG=config/config.yaml
 
 bash workflow/00_setup_dirs.sh        # creates $OUTPUT_ROOT/{data,resources,results,logs}
 bash workflow/00_confirm_build.sh     # asserts GRCh38 + resource paths + tool versions
+bash workflow/00_download_refs.sh     # fetches the current ClinVar release
 ```
-
-`00_confirm_build.sh` writes a version log to `$OUTPUT_ROOT/logs/annotation/`
-and fails fast if any resource path in `config/config.yaml` is missing.
-
-### Step 0 — Sample QC (produces the keep-list)
-
-Runs **once, before annotation**. Uses the biobank's already-computed common-
-variants outputs (kinship, PLINK sex-check, PCA) so we don't re-genotype.
-
-```bash
-bash workflow/00_run_sample_qc.sh
-```
-
-**What it checks** (thresholds in `config.qc.sample`):
-- **Missingness** — drop samples with variant missingness above `missingness_max` (default 5%).
-- **Sex check** — reported sex vs PLINK `--check-sex` inferred sex; `mismatch_action` = `flag` or `exclude`.
-- **Contamination** — VerifyBamID2 `FREEMIX > freemix_max` (default 3%) → exclude.
-  Set `qc.sample.contamination.enabled: true` once the summary is on cluster.
-- **Kinship** — from `common_variants/.../kinship/kinship.tsv`. For pairs with
-  KING kinship ≥ `duplicate_kin_min` (0.354, MZ-twin / duplicate), keep the sample
-  with the highest call rate. Related pairs (≥ 2nd degree) are **kept but flagged**;
-  ML uses group-aware cross-validation.
-
-**Outputs** (all gitignored on Minerva):
-- `results/qc/sample_keep_list.tsv`   — one row per KEPT `sample_id`.
-- `results/qc/sample_qc_report.tsv`   — per-sample kept/dropped + reasons.
-- `results/qc/sample_qc_summary.md`   — aggregate counts (no per-sample values).
 
 ### Step 1 — Annotation (gated: single chunk, then array)
 
-Per-chunk worker (`workflow/01_norm_vep_chunk.sh`) does, in order:
-
-1. **`bcftools norm`** — split multi-allelics, left-align to `$FASTA`.
-2. **Site + genotype QC** (`config.qc.site_gt`, expressions in `src/qc/site_gt_qc.py`):
-   - `bcftools view -f PASS` (keep VQSR/GATK PASS sites).
-   - `bcftools +setGT` null low-quality genotypes:
-     `FMT/DP<10 | FMT/GQ<20 | het-AB outside [0.20, 0.80]`.
-   - `bcftools +fill-tags` recomputes AC/AN/F_MISSING.
-   - `bcftools view -e ...` drops sites with `F_MISSING > 10%` or that
-     became mono-allelic after masking.
-3. **VEP** — one pass, attaches **all** raw fields the downstream classifiers need:
-   MANE Select / canonical / HGVS, **LOFTEE** (`hc` pLoF), **AlphaMissense**
-   scores, **ClinVar** via `--custom` (CLNSIG/CLNREVSTAT/CLNDN/CLNVI),
-   **gnomAD** AF/popmax via `--custom`, **dbNSFP** if present. Output bgzip + tabix
-   into `$OUTPUT_ROOT/data/annotated/`.
-
-Parallelism runs at two levels:
-- *Within a chunk:* `vep --fork N` runs N threads (LSF `-n N` matches).
-- *Across chunks:* the LSF array runs many workers concurrently, capped at
-  `config.lsf.array_concurrency_cap` (default `%50`).
-
-**Submit — gated:**
+Per-chunk worker: `bcftools norm` → **site + GT QC** → `vep` with LOFTEE,
+AlphaMissense, ClinVar via `--custom`, gnomAD AF via `--custom`, dbNSFP if present.
 
 ```bash
-# STEP 1a: single-chunk GATE — run one chunk, review, do NOT continue on failure.
-bash workflow/02_submit_single.lsf
-# → review $OUTPUT_ROOT/data/annotated/ + logs; validate_chunk must print OK.
-
-# STEP 1b: only after 1a passes review, capped LSF array over all chunks.
-bash workflow/03_submit_array.lsf     # bsub -J "vep[1-N]%50"
+bash workflow/02_submit_single.lsf     # STEP-1 GATE: one chunk, review before scaling
+bash workflow/03_submit_array.lsf      # capped LSF array (resume-safe)
 ```
 
-The workers are **resume-safe**: rerunning skips any chunk whose output already
-exists and passes `src.annotation.validate_chunk`.
+Parallelism at two levels: `vep --fork N` threads within a chunk (LSF `-n N`
+matches), and many chunks concurrently at `%config.lsf.array_concurrency_cap`
+(default 50). Workers skip chunks whose validated output already exists.
 
-### Step 2 — Classification (three frameworks, scaffolded)
+### Step 2 — Sample QC (from VCFs)
 
-Per-chunk classifiers read the annotated VCFs and emit long variant tables
-under `results/variants/`:
+Runs after Step 1 finishes.
 
-| Module                              | Framework        | Output                 |
-|-------------------------------------|------------------|------------------------|
-| `src/classification/clinvar.py`     | ClinVar P/LP     | `clinvar_plp.tsv`      |
-| `src/classification/acmg.py`        | ACMG via ANNOVAR + InterVar (auto), then **drop variants ClinVar calls B/LB** | `acmg_plp.tsv` |
-| `src/classification/alphamissense.py` | AlphaMissense gene-specific evidence-label calibration (Chen/Pejaver; min-strength `Moderate`; domain-aggregate recorded, never promotes) | `am_plp.tsv` |
-| `src/classification/qc.py`          | Per-gene QC: paralog artifacts (PMS2/PMS2CL, CHEK2, NBN, ...) + cohort-vs-gnomAD carrier-freq inflation | `qc_per_gene.tsv` |
+```bash
+bash workflow/00_run_sample_qc.sh      # submits per-chunk stats array
+# after the array is DONE:
+bash workflow/00_wes_qc_aggregate.sh   # chains kinship + sex-check + keep-list
+```
 
-### Step 3 — Carrier matrix (long format; scaffolded)
+Outputs: `sample_keep_list.tsv`, `sample_qc_report.tsv`, `sample_qc_summary.md`
+under `$OUTPUT_ROOT/results/qc/`. Downstream carrier extraction filters to
+this keep-list.
+
+### Step 3 — Classification (three frameworks, scaffolded)
+
+| Module                                | Framework                                                                                                     | Output              |
+|---------------------------------------|---------------------------------------------------------------------------------------------------------------|---------------------|
+| `src/classification/clinvar.py`       | ClinVar P/LP; `min_review_stars: 2`, no conflicts                                                              | `clinvar_plp.tsv`   |
+| `src/classification/acmg.py`          | ANNOVAR + InterVar rule-based; **drop variants ClinVar calls B/LB**                                            | `acmg_plp.tsv`      |
+| `src/classification/alphamissense.py` | Chen/Pejaver gene-specific evidence-label calibration; min-strength Moderate; domain-aggregate recorded, never promotes | `am_plp.tsv`        |
+| `src/classification/qc.py`            | Per-gene QC: paralog artifacts (PMS2/PMS2CL...) + cohort-vs-gnomAD carrier-freq inflation                      | `qc_per_gene.tsv`   |
+
+### Step 4 — Carrier matrix (long format)
 
 `src/carriers/carrier_matrix.py` unions the three variant sets, runs
 `bcftools query` per qualifying variant, and emits **one row per (variant × person)**:
@@ -143,40 +210,29 @@ under `results/variants/`:
 chr  pos  ref  alt  gene  person_id  is_clinvar_PLP  is_acmg_PLP  is_AM_PLP
 ```
 
-The genotype-parse filters to `results/qc/sample_keep_list.tsv` from Step 0.
-Optional wide pivot (`config.carriers.emit_wide_pivot: true`) produces the
-sample × gene matrix for ML.
+Filters to `results/qc/sample_keep_list.tsv`. Optional wide pivot for ML.
 
-### Step 4 — Phenotype + covariates (scaffolded)
+### Step 5 — Phenotype + covariates
 
-- `src/phenotype/id_harmonize.py` — canonical `person_id` across
-  `SINAI_*` (pre-2022) and `SINAI-Million_*` (post-2022) forms.
-- `src/phenotype/cases.py` — `PheWas_MSM_phecodeX.tsv` roster, plus
-  **ICD → phecodeX** mapping from the ICD-coded `Encounter_Diagnosis.txt`
-  and `Problem_List.txt` for first-diagnosis dates; incident vs prevalent
-  distinction using Medical/Surgical History.
-- `src/phenotype/famhx.py` — first-degree cancer family history from `Family_History.txt`.
-- `src/phenotype/covariates.py` — demographics, smoking/alcohol, BMI,
-  parity/age-at-first-birth, screening flags — collapsed to the
-  temporal-leakage window in `config.ml.temporal_leakage.feature_window_days`.
+- `id_harmonize.py` — canonical `person_id` across `SINAI_*` and `SINAI-Million_*` forms.
+- `cases.py` — phecodeX roster + **ICD → phecodeX** from ICD-coded
+  `Encounter_Diagnosis.txt` and `Problem_List.txt` for first-dx dates.
+- `famhx.py` — first-degree cancer family history.
+- `covariates.py` — demographics, smoking, BMI, parity, screening; collapsed to
+  the temporal-leakage window in `config.ml.temporal_leakage.feature_window_days`.
 
-### Step 5 — Analysis-ready join (scaffolded)
+### Step 6 — Analysis-ready join
 
-`src/carriers/join.py` joins the long carrier table with harmonized IDs +
-ancestry PCs (from `common_variants/.../pca/pcs.tsv`) + phenotype rows,
-writing `results/analysis/analysis_ready.tsv`.
+`src/carriers/join.py` joins the long carrier table with harmonized IDs, PCs
+(from Step 2's WES-derived PCA or the biobank's common-variants PCs), and
+phenotype rows → `results/analysis/analysis_ready.tsv`.
 
-### Step 6 — ML per cancer (scaffolded)
+### Step 7 — ML per cancer
 
-Adding a cancer = adding a `config/<cancer>.yaml`. Provided today: `crc.yaml`,
-`breast.yaml`. Pipeline modules under `src/ml/` mirror the BioMe repo:
-
-```
-dataset → match (propensity k:1 caliper) → features (window [-730d, -182d]) →
-models (penalized logistic / Cox / RF / XGBoost) → evaluate (AUC, PR-AUC,
-ancestry-stratified calibration, SHAP) → external_validate (cross-cohort with
-BioMe)
-```
+Add a cancer by adding `config/<cancer>.yaml` (provided: `crc.yaml`, `breast.yaml`).
+Pipeline: dataset → match (propensity k:1 caliper) → features (window `[-730d, -182d]`)
+→ models (penalized logistic / Cox / RF / XGBoost) → evaluate (AUC, PR-AUC,
+ancestry-stratified calibration, SHAP) → external_validate (cross-cohort with BioMe).
 
 ---
 
@@ -184,18 +240,21 @@ BioMe)
 
 ```
 config/            config.yaml (single source of truth) + crc.yaml + breast.yaml
-src/qc/            sample_qc, site_gt_qc (helpers imported by workflow scripts)
+src/qc/            sample_qc, site_gt_qc, vcf_stats (bcftools + plink2 helpers)
 src/annotation/    chunk enumeration + per-chunk output validation
 src/classification/  clinvar.py, acmg.py, alphamissense.py, qc.py
 src/phenotype/     id_harmonize, cases (ICD→phecodeX), famhx, covariates
 src/carriers/      long-format carrier table + optional wide pivot
 src/ml/            dataset, match, features, models, evaluate, external_validate
 src/common/        config loader, PHI-safe logger
-workflow/          numbered scripts (00_setup, 00_confirm_build, 00_run_sample_qc,
-                   01_norm_vep_chunk, 02_submit_single, 03_submit_array, 04_validate)
+workflow/          numbered scripts:
+                     00_setup_dirs, 00_confirm_build, 00_download_refs,
+                     01_norm_vep_chunk, 02_submit_single, 03_submit_array,
+                     04_validate_chunk,
+                     00_run_sample_qc → 00_wes_qc_chunks → 00_wes_qc_aggregate
 envs/              conda specs: annotation.yml, analysis.yml
 docs/              annotation_runbook.md, data_dictionary.md, governance.md
-tests/             synthetic fixtures + unit tests for rules and QC helpers
+tests/             synthetic fixtures + unit tests for classification + QC helpers
 ```
 
 ## Runtime tree (Minerva-only, gitignored)
@@ -203,24 +262,15 @@ tests/             synthetic fixtures + unit tests for rules and QC helpers
 ```
 $OUTPUT_ROOT = /sc/arion/projects/rg_huangk06/variants_PLP_MSM
   data/annotated/           per-chunk annotated VCFs + tabix indexes
-  resources/                symlinks/mirrors to references
-  results/qc/               sample_keep_list.tsv + reports
+  resources/clinvar/YYYY-MM-DD/  weekly ClinVar releases (downloaded on demand)
+  resources/                other references (VEP cache, LOFTEE, AlphaMissense, ...)
+  results/qc/               sample_keep_list + reports + stats/ + king + sexcheck
   results/variants/         classified variant tables per framework
   results/carriers/         long-format carriers + optional wide pivot
   results/analysis/         analysis-ready joined tables
   results/models/           ML outputs
   logs/                     per-stage logs (may contain PHI; never leaves cluster)
 ```
-
-## What the config controls (single source of truth)
-
-- Input auto-resolution: latest WES batch, latest phenotypes dated folder, latest ClinVar release.
-- Reference paths: FASTA, VEP cache/plugins, LOFTEE, AlphaMissense scores + calibration table, ClinVar, gnomAD, dbNSFP, ANNOVAR humandb, InterVar.
-- **QC thresholds** (`qc.site_gt` and `qc.sample`) — everything QC touches lives here.
-- Classification thresholds: ClinVar stars, ACMG "remove if ClinVar B/LB" flag, AlphaMissense min-evidence.
-- LSF: queue, project, walltime, memory, `--fork`, array cap, modules to load.
-- Phenotype: ICD→phecodeX table, cancer phecodes, case-definition rules.
-- ML: temporal-leakage window, matching ratio/caliper, covariates, models, CV.
 
 See [`docs/annotation_runbook.md`](docs/annotation_runbook.md) for the runbook,
 [`docs/data_dictionary.md`](docs/data_dictionary.md) for output schemas, and

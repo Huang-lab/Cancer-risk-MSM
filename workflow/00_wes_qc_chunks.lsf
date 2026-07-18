@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# =============================================================================
+# LSF array over annotated chunks: per-chunk `bcftools stats -s -` output.
+# Runs AFTER Step 1 (annotation) so it operates on the site/GT-QC'd VCFs.
+#
+# Outputs: $OUTPUT_ROOT/results/qc/stats/<chunk>.stats.txt (one per chunk)
+# =============================================================================
+set -euo pipefail
+
+CONFIG="${CONFIG:-config/config.yaml}"
+OUTPUT_ROOT="$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['project']['output_root'])")"
+QUEUE="$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['lsf']['queue'])")"
+PROJECT="$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['lsf']['project'])")"
+CAP="$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG'))['lsf']['array_concurrency_cap'])")"
+
+STATS_DIR="$OUTPUT_ROOT/results/qc/stats"
+LSF_LOG_DIR="$OUTPUT_ROOT/logs/qc/lsf"
+mkdir -p "$STATS_DIR" "$LSF_LOG_DIR"
+
+# List annotated chunks
+CHUNK_LIST="$OUTPUT_ROOT/logs/qc/annotated_chunks.list"
+ls "$OUTPUT_ROOT/data/annotated"/*.annot.vcf.gz > "$CHUNK_LIST"
+N=$(wc -l < "$CHUNK_LIST")
+echo "Chunks to stat: $N"
+
+bsub \
+  -J "wes_qc_stats[1-$N]%$CAP" \
+  -q "$QUEUE" -P "$PROJECT" \
+  -n 2 -R "rusage[mem=4000]" -W "02:00" \
+  -o "$LSF_LOG_DIR/stats.%J.%I.out" \
+  -e "$LSF_LOG_DIR/stats.%J.%I.err" \
+  bash -lc '
+    set -euo pipefail
+    module load bcftools/1.19 || true
+    VCF=$(sed -n "${LSB_JOBINDEX}p" '"$CHUNK_LIST"')
+    OUT='"$STATS_DIR"'/$(basename "$VCF" .annot.vcf.gz).stats.txt
+    if [[ -s "$OUT" ]]; then echo "SKIP $OUT"; exit 0; fi
+    bcftools stats -s - "$VCF" > "$OUT"
+  '
+
+echo "Array submitted. When done, run 00_wes_qc_aggregate.sh."
