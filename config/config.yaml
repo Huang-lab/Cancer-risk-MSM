@@ -202,17 +202,79 @@ lsf:
 
 # --- Phenotyping ------------------------------------------------------------
 phenotype:
-  icd_to_phecodex_map: /sc/arion/projects/rg_huangk06/refs/phecodeX/icd_to_phecodeX.tsv
+  # ICD -> phecodeX map. If null, uses the small built-in cancer-only map in
+  # src/phenotype/icd_mapping.py (enough for CRC + breast; extend on cluster).
+  icd_to_phecodex_map: null   # e.g. /sc/arion/projects/rg_huangk06/refs/phecodeX/icd_to_phecodeX.tsv
+
   cancer_phecodes:
     colorectal: ["CA_101.1", "CA_101.11"]     # confirm phecodeX codes on cluster
     breast:     ["CA_105.1"]
-  case_definition:
-    require_incident: true          # exclude prevalent cases from ML
-    min_encounters_case:  1
-    min_encounters_control: 2       # >=2 healthcare encounters, none cancer-coded
+
+  # EHR column layouts. Adjust column NAMES to match your actual files;
+  # everything else in the pipeline reads from these keys.
+  ehr_schema:
+    encounter_diagnosis:
+      person_id_col:   "MRN"
+      icd_col:         "ICD_CODE"
+      icd_version_col: "ICD_VERSION"        # "9" | "10" (optional; inferred if missing)
+      date_col:        "ENCOUNTER_DATE"
+      date_format:     "%Y-%m-%d"
+      sep:             "\t"
+    problem_list:
+      person_id_col:   "MRN"
+      icd_col:         "ICD_CODE"
+      icd_version_col: "ICD_VERSION"
+      noted_date_col:  "NOTED_DATE"
+      resolved_col:    "RESOLVED_DATE"
+      status_col:      "STATUS"             # "Active"/"Resolved" (optional)
+      date_format:     "%Y-%m-%d"
+      sep:             "\t"
+    family_history:
+      person_id_col:   "MRN"
+      relationship_col: "RELATIONSHIP"      # e.g. "MOTHER" / "PATERNAL_GRANDFATHER"
+      condition_col:    "CONDITION"         # free text or ICD/SNOMED code
+      condition_code_col: null              # optional coded column; if present, prefer
+      degree_col:       null                # optional numeric 1|2; else inferred from relationship
+      onset_age_col:    "AGE_AT_DIAGNOSIS"
+      sep:              "\t"
+    demographics:
+      person_id_col:      "MRN"
+      birth_year_col:     "BIRTH_YEAR"      # or "DATE_OF_BIRTH" -> parse year
+      sex_col:            "SEX"
+      enrollment_date_col: "ENROLLMENT_DATE"  # optional; used for incident-case flag
+      date_format:        "%Y-%m-%d"
+      sep:                "\t"
+    phecodex_roster:
+      # PheWas_MSM_phecodeX.tsv — wide (columns = phecodex codes) or long.
+      format: "auto"                        # "wide" | "long" | "auto"
+      person_id_col: "MRN"
+      # for long format:
+      phecodex_col:  "phecodeX"
+      value_col:     "case_control"         # 1=case, 0=ctrl, NA=undetermined
+      sep: "\t"
+
+  # Roster policy — see plan doc
+  roster:
+    famhx_scope: any_cancer                 # any_cancer | cancer_specific
+    control_exclusion: any_cancer           # any_cancer | this_cancer_only
+    emit_prevalent_cases: true              # keep with incident_flag=false
+    min_control_encounters: 2               # >=N EHR encounters -> qualifies as active member
   famhx:
-    cancer_conditions: ["CANCER", "MALIGNANT_NEOPLASM"]
-    relative_degrees: [1]           # first-degree relatives
+    relative_degrees: [1, 2]                # 1st- and 2nd-degree relatives
+    # Free-text cancer patterns matched (case-insensitive) if condition is not coded.
+    cancer_free_text_patterns:
+      - "cancer"
+      - "malignant"
+      - "neoplasm"
+      - "carcinoma"
+      - "sarcoma"
+      - "leukemia"
+      - "leukaemia"
+      - "lymphoma"
+      - "melanoma"
+      - "myeloma"
+      - "tumor"
+      - "tumour"
 
 # --- Carrier matrix ---------------------------------------------------------
 carriers:

@@ -212,14 +212,43 @@ chr  pos  ref  alt  gene  person_id  is_clinvar_PLP  is_acmg_PLP  is_AM_PLP
 
 Filters to `results/qc/sample_keep_list.tsv`. Optional wide pivot for ML.
 
-### Step 5 — Phenotype + covariates
+### Step 5 — Phenotype roster (case / famhx / control) — INDEPENDENT of annotation
 
-- `id_harmonize.py` — canonical `person_id` across `SINAI_*` and `SINAI-Million_*` forms.
-- `cases.py` — phecodeX roster + **ICD → phecodeX** from ICD-coded
-  `Encounter_Diagnosis.txt` and `Problem_List.txt` for first-dx dates.
-- `famhx.py` — first-degree cancer family history.
-- `covariates.py` — demographics, smoking, BMI, parity, screening; collapsed to
-  the temporal-leakage window in `config.ml.temporal_leakage.feature_window_days`.
+**Runnable today** without waiting for annotation. Builds a per-(person, cancer)
+roster from EHR ICD codes:
+
+| Group     | Definition                                                                 |
+|-----------|----------------------------------------------------------------------------|
+| `case`    | Cancer diagnosis (ICD-coded, mapped to phecodeX) for this cancer.          |
+| `famhx`   | No cancer diagnosis, but a 1st- or 2nd-degree relative had cancer (any).   |
+| `control` | No cancer diagnosis, no family history of cancer.                          |
+| `excluded`| Would-be control but has a different cancer diagnosis (`control_exclusion: any_cancer`). |
+
+Run on Minerva:
+```bash
+bash workflow/10_build_phenotype_roster.sh
+# outputs: $OUTPUT_ROOT/results/phenotype/{cases,famhx,roster}.tsv + roster_summary.md
+```
+
+Modules:
+- `src/phenotype/icd_mapping.py` — ICD-9 / ICD-10 → phecodeX (built-in cancer
+  map; `phenotype.icd_to_phecodex_map` overrides with a full crosswalk file).
+- `src/phenotype/cases.py` — reads `Encounter_Diagnosis.txt` + `Problem_List.txt`
+  (both ICD-coded), maps to phecodeX, cross-checks the `PheWas_MSM_phecodeX.tsv`
+  roster, emits per (person, cancer): `is_case, first_dx_date, incident_flag`
+  (using enrollment date from Demographics when present).
+- `src/phenotype/famhx.py` — parses `Family_History.txt`; classifies relationships
+  into 1st- vs 2nd-degree (parent / sibling / child; grandparent / aunt/uncle /
+  niece/nephew / half-sib); detects cancer via coded column (ICD→phecodeX) or
+  free-text patterns (`cancer|malignant|carcinoma|lymphoma|melanoma|...`).
+- `src/phenotype/roster.py` — synthesizes the 3-way (+ excluded) group per
+  (person, cancer) using `phenotype.roster.{famhx_scope, control_exclusion,
+  emit_prevalent_cases}`; writes `roster.tsv` + aggregate `roster_summary.md`.
+- `src/phenotype/covariates.py` — demographics, smoking, BMI, parity, screening;
+  collapsed to the temporal-leakage window in `config.ml.temporal_leakage.feature_window_days`.
+
+**Column layout is config-driven** (`config.phenotype.ehr_schema.*`) so column
+names for each EHR file can be adjusted in one place without code changes.
 
 ### Step 6 — Analysis-ready join
 
