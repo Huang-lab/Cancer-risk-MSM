@@ -2,32 +2,32 @@
 # Cancer-risk-MSM — single source of truth (paths + parameters, no data values)
 #
 # SCOPE: this repo is the DOWNSTREAM layer. Variant annotation, P/LP
-# classification, and carrier extraction are owned by the Nextflow pipeline
-# `Huang-lab/germline-plp-carrier-nf`, whose outputs we consume read-only.
-# We own: sample QC, phenotyping, analysis-ready joins, and cancer-risk ML.
+# classification, carrier extraction, AND sample-level QC are all owned by the
+# Nextflow pipeline `Huang-lab/germline-plp-carrier-nf`, whose outputs we
+# consume read-only. We own: EHR phenotyping, analysis-ready joins, and
+# cancer-risk ML.
 # =============================================================================
 
 project:
   name: Cancer-risk-MSM
   reference_build: GRCh38
-  # Nested under the NF project dir so all MSM P/LP work lives together, but
-  # in its own subtree so the two pipelines never write to the same paths.
+  # Nested under the shared project dir so all MSM P/LP work lives together,
+  # but in its own subtree so the two pipelines never write the same paths.
   output_root: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/cancer_risk
 
 # --- Inputs (all read-only) --------------------------------------------------
 inputs:
   msm_data_root: /sc/arion/projects/MSM/data
 
-  # Raw WES pVCF chunks — used ONLY for sample-level QC (missingness, kinship,
-  # sex-check) and to enumerate which samples have genotypes. Annotation is
-  # NOT our job; germline-plp-carrier-nf handles that.
+  # Raw WES pVCF chunks — used ONLY to enumerate which samples have genotypes
+  # (for the "with WES" counts). Annotation and sample QC are NOT our job.
   wes:
     pvcf_target_glob: "WES/combined/batch_*/pVCF/Target"
     batch: null                    # null -> auto-select highest batch_###
     chunk_glob: "*.vcf.gz"
     expected_chunks: 498
-    # Plain-text list of WES sample IDs from `bcftools query -l`.
-    # Produced by workflow/09_export_wes_samples.sh.
+    # Plain-text list of WES sample IDs, one per line.
+    # Produced by workflow/09_export_wes_samples.sh (`bcftools query -l`).
     sample_list_file: null         # e.g. <output_root>/resources/wes_samples.txt
 
   # Outputs of germline-plp-carrier-nf that we consume.
@@ -41,6 +41,13 @@ inputs:
     carrier_matrix: "carriers/carrier_matrix.tsv"   # long: variant x person
     variants_dir:   "variants"                      # clinvar_plp / acmg_plp / am_plp / qc_per_gene
     manifest:       "manifest.json"                 # ref build + tool versions + pipeline SHA
+    # Sample-level QC is done by the NF pipeline. Point these at its outputs so
+    # ML can (a) restrict to QC-passing samples and (b) get relatedness for
+    # group-aware cross-validation. Paths are relative to each results dir.
+    # TODO(user): confirm the actual NF filenames.
+    sample_keep_list: null          # e.g. "qc/sample_keep_list.tsv" — one kept sample per line
+    relatedness_table: null         # e.g. "qc/king.kin0" — pairwise kinship for group-aware CV
+    sample_keep_list_col: "sample_id"
     # Column names in NF's carrier_matrix.tsv (adjust if NF changes its schema).
     columns:
       person_id:       "person_id"
@@ -77,51 +84,11 @@ inputs:
       health_maintenance_glob: "HEALTH_MAINTENANCE_*.txt"
 
 # --- Reference resources ----------------------------------------------------
-# Only what sample QC needs. VEP cache / ClinVar / gnomAD / AlphaMissense /
-# ANNOVAR are the NF pipeline's concern and live under its refs/ dir.
+# We do not annotate, so we reference nothing directly. VEP cache / ClinVar /
+# gnomAD / AlphaMissense / ANNOVAR all belong to the NF pipeline's refs/ dir,
+# recorded here only for provenance when reading its manifest.json.
 resources:
   refs_root: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/refs
-  fasta: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/refs/GRCh38/GRCh38.primary_assembly.genome.fa
-
-# --- QC (sample-level; site/GT masking only as a pre-step for kinship) -------
-qc:
-  # Genotype masking applied before kinship/PCA so low-confidence calls don't
-  # skew relatedness. Mirrors germline-plp-carrier-nf's NORM_QC thresholds.
-  site_gt:
-    keep_filter: PASS
-    genotype_dp_min: 10
-    genotype_gq_min: 20
-    genotype_ab_het_min: 0.20
-    genotype_ab_het_max: 0.80
-    site_missing_max: 0.10
-    drop_monoallelic_after_mask: true
-
-  # Sample QC computed FROM the raw pVCFs (no annotation needed for any of it).
-  sample:
-    missingness_max: 0.05
-    sex_check:
-      enabled: true
-      f_stat_female_max: 0.20
-      f_stat_male_min: 0.80
-      mismatch_action: flag         # "flag" | "exclude"
-    contamination_proxy:
-      het_hom_z_max: 4.0
-    contamination_verifybamid:
-      enabled: false
-      verifybamid_summary: null
-      freemix_max: 0.03
-    kinship:
-      wes_kinship_inputs:
-        maf_min: 0.01
-        geno_max: 0.05
-        hwe_p_min: 1.0e-10
-        ld_window_kb: 500
-        ld_step: 50
-        ld_r2_max: 0.2
-        threads: 16
-      duplicate_kin_min: 0.354      # MZ-twin / duplicate; keep one
-      pi_hat_related_max: 0.1875    # >= 2nd-degree; kept but flagged
-      keep_strategy: highest_call_rate
 
 # --- Focus gene panel (reporting / stratification only) ----------------------
 gene_panels:
@@ -164,9 +131,7 @@ lsf:
   memory_mb: 16000
   array_concurrency_cap: 50
   modules:
-    - bcftools/1.19
-    - htslib/1.19
-    - plink2
+    - bcftools/1.19               # only for `bcftools query -l` (sample list)
     - python/3.11
 
 # --- Phenotyping ------------------------------------------------------------
@@ -260,7 +225,7 @@ carriers:
   # per-person / per-gene features for ML.
   frameworks: [clinvar, acmg, am]           # which P/LP calls to build features from
   emit_wide_pivot: true                     # sample x gene matrix
-  restrict_to_sample_keep_list: true        # use results/qc/sample_keep_list.tsv
+  restrict_to_sample_keep_list: true        # use NF's sample keep-list (see carrier_source)
   panel_for_aggregate: cancer_predisposition_28
 
 # --- ML ---------------------------------------------------------------------

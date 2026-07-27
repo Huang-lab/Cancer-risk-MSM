@@ -130,8 +130,45 @@ def read_carriers(cfg: dict) -> list[CarrierRow]:
     return list(merged.values())
 
 
+def read_sample_keep_list(cfg: dict) -> set[str]:
+    """Read the NF pipeline's sample-QC keep-list (sample-level QC is NF's job).
+
+    Returns an empty set when the path isn't configured, which
+    `filter_to_keep_list` treats as a no-op rather than excluding everyone.
+    """
+    src = cfg["inputs"]["carrier_source"]
+    rel = src.get("sample_keep_list")
+    if not rel:
+        return set()
+    col = src.get("sample_keep_list_col", "sample_id")
+    keep: set[str] = set()
+    for d in nf_result_dirs(cfg):
+        p = d / rel
+        if not p.exists():
+            continue
+        with p.open(newline="") as fh:
+            first = fh.readline()
+            has_header = col in first
+            if not has_header and first.strip():
+                keep.add(first.strip().split("\t")[0])
+            rdr = csv.DictReader(fh, delimiter="\t", fieldnames=None) if has_header else None
+            if has_header:
+                header = [h.strip() for h in first.rstrip("\n").split("\t")]
+                idx = header.index(col) if col in header else 0
+                for line in fh:
+                    f = line.rstrip("\n").split("\t")
+                    if len(f) > idx and f[idx].strip():
+                        keep.add(f[idx].strip())
+            else:
+                for line in fh:
+                    sid = line.strip().split("\t")[0]
+                    if sid:
+                        keep.add(sid)
+    return keep
+
+
 def filter_to_keep_list(rows: list[CarrierRow], keep: set[str]) -> list[CarrierRow]:
-    """Restrict to QC-passing samples (results/qc/sample_keep_list.tsv)."""
+    """Restrict to QC-passing samples. Empty keep-set is a no-op, not a wipe."""
     if not keep:
         return rows
     return [r for r in rows if r.person_id in keep]

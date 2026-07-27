@@ -26,39 +26,23 @@ Reference build, tool versions, pipeline SHA. We read `reference_build` and
 Variant-level classification tables. Available for per-gene QC review; the
 carrier matrix is the primary join key for ML features.
 
+### NF sample QC outputs
+Sample-level QC (missingness, kinship, sex-check) is performed by the NF
+pipeline. Configure where to find its outputs under
+`inputs.carrier_source`:
+
+| config key | expects | used for |
+|---|---|---|
+| `sample_keep_list` | one QC-passing sample per row (with or without header) | restrict carriers + roster to QC-passing samples |
+| `sample_keep_list_col` | column name if the file has a header (default `sample_id`) | — |
+| `relatedness_table` | pairwise kinship (e.g. KING `.kin0`) | group-aware cross-validation so relatives never split across CV folds |
+
+Both are `null` until confirmed. With `sample_keep_list` unset,
+`filter_to_keep_list` is a no-op rather than excluding every sample.
+
 ---
 
 ## Outputs we produce
-
-### `results/qc/psc_agg.tsv`
-Per-sample genotype counts aggregated across pVCF chunks.
-
-| column        | type  | note                                     |
-|---------------|-------|------------------------------------------|
-| sample_id     | str   |                                          |
-| n_called      | int   | refHom + nonRefHom + hets                |
-| n_missing     | int   |                                          |
-| missingness   | float | n_missing / (n_called + n_missing)       |
-| het_hom_ratio | float | nHets / nNonRefHom — contamination proxy |
-| n_singletons  | int   |                                          |
-
-### `results/qc/sample_keep_list.tsv`
-One row per **kept** sample. Consumed by the analysis join.
-
-### `results/qc/sample_qc_report.tsv`
-| column | type | note |
-|---|---|---|
-| sample_id | str | |
-| call_rate | float | |
-| het_hom | float | |
-| sex_reported / sex_inferred | str | `M`/`F` |
-| sex_mismatch | bool | |
-| kinship_flag | str | `""` / `duplicate_dropped` / `duplicate_kept` / `related_kept` |
-| kept | bool | |
-| reasons | str | comma-separated failed checks |
-
-Also emitted: `king.king*` (kinship), `sexcheck.sexcheck` (chrX F-stat),
-`wes_pca.eigenvec` (20 WES-derived ancestry PCs).
 
 ### `results/phenotype/cases.tsv`
 | column | type | note |

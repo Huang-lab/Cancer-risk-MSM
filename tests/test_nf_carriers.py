@@ -17,6 +17,7 @@ from src.carriers.nf_carriers import (
     per_gene_flags,
     read_carriers,
     read_manifests,
+    read_sample_keep_list,
 )
 
 FIXTURES = Path(__file__).parent / "synthetic"
@@ -119,6 +120,35 @@ def test_keep_list_filter(tmp_path: Path):
     assert {r.person_id for r in kept} == {"TEST_001", "TEST_002"}
     # Empty keep-list is a no-op (QC not run yet), not a wipe.
     assert len(filter_to_keep_list(rows, set())) == len(rows)
+
+
+def test_read_sample_keep_list_with_header(tmp_path: Path):
+    d = _stage_nf_run(tmp_path, "results-batch1")
+    (d / "qc").mkdir()
+    (d / "qc" / "sample_keep_list.tsv").write_text(
+        "sample_id\tcall_rate\nTEST_001\t0.99\nTEST_002\t0.98\n")
+    cfg = _cfg(tmp_path, ["results-batch1"])
+    cfg["inputs"]["carrier_source"]["sample_keep_list"] = "qc/sample_keep_list.tsv"
+    assert read_sample_keep_list(cfg) == {"TEST_001", "TEST_002"}
+
+
+def test_read_sample_keep_list_headerless(tmp_path: Path):
+    d = _stage_nf_run(tmp_path, "results-batch1")
+    (d / "qc").mkdir()
+    (d / "qc" / "keep.txt").write_text("TEST_001\nTEST_003\n")
+    cfg = _cfg(tmp_path, ["results-batch1"])
+    cfg["inputs"]["carrier_source"]["sample_keep_list"] = "qc/keep.txt"
+    assert read_sample_keep_list(cfg) == {"TEST_001", "TEST_003"}
+
+
+def test_read_sample_keep_list_unconfigured_is_empty(tmp_path: Path):
+    _stage_nf_run(tmp_path, "results-batch1")
+    cfg = _cfg(tmp_path, ["results-batch1"])   # sample_keep_list not set
+    keep = read_sample_keep_list(cfg)
+    assert keep == set()
+    # ...and an empty keep-set must not wipe the carrier rows.
+    rows = read_carriers(cfg)
+    assert len(filter_to_keep_list(rows, keep)) == len(rows)
 
 
 def test_per_gene_and_panel_flags(tmp_path: Path):
