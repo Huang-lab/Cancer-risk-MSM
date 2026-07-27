@@ -18,6 +18,9 @@ inputs:
     batch: null                    # null -> auto-select highest batch_###
     chunk_glob: "*.vcf.gz"
     expected_chunks: 498           # sanity check; not enforced
+    # Plain-text list of WES sample IDs (one per line) from `bcftools query -l`
+    # on any pVCF chunk. Produced by workflow/09_export_wes_samples.sh.
+    sample_list_file: null         # e.g. $OUTPUT_ROOT/resources/wes_samples.txt
 
   common_variants:
     root_glob: "common_variants/combined/batch_*"
@@ -207,51 +210,56 @@ phenotype:
   icd_to_phecodex_map: null   # e.g. /sc/arion/projects/rg_huangk06/refs/phecodeX/icd_to_phecodeX.tsv
 
   cancer_phecodes:
-    colorectal: ["CA_101.1", "CA_101.11"]     # confirm phecodeX codes on cluster
-    breast:     ["CA_105.1"]
+    # phecodeX codes below are placeholders — confirm on cluster with the actual
+    # phecodeX v1.2 map. The pipeline groups counts by these cancer keys.
+    colorectal:  ["CA_101.1", "CA_101.11"]
+    breast:      ["CA_105.1"]
+    prostate:    ["CA_105.2"]              # TODO confirm
+    lung:        ["CA_101.6"]              # TODO confirm
+    ovarian:     ["CA_105.3"]              # TODO confirm
+    pancreatic:  ["CA_101.2"]              # TODO confirm
 
-  # EHR column layouts. Adjust column NAMES to match your actual files;
-  # everything else in the pipeline reads from these keys.
+  # EHR column layouts — real BioMe phenofile schemas.
   ehr_schema:
     encounter_diagnosis:
-      person_id_col:   "MRN"
-      icd_col:         "ICD_CODE"
-      icd_version_col: "ICD_VERSION"        # "9" | "10" (optional; inferred if missing)
-      date_col:        "ENCOUNTER_DATE"
-      date_format:     "%Y-%m-%d"
-      sep:             "\t"
+      person_id_col:   "sample_name"
+      icd_col:         "dx_code"
+      icd_version_col: "dx_code_type"       # values "ICD10" / "ICD9"
+      date_col:        "encounter_date"
+      date_format:     "%m/%d/%Y"
+      sep:             "|"
     problem_list:
-      person_id_col:   "MRN"
-      icd_col:         "ICD_CODE"
-      icd_version_col: "ICD_VERSION"
-      noted_date_col:  "NOTED_DATE"
-      resolved_col:    "RESOLVED_DATE"
-      status_col:      "STATUS"             # "Active"/"Resolved" (optional)
-      date_format:     "%Y-%m-%d"
-      sep:             "\t"
+      person_id_col:   "sample_name"
+      icd_col:         "icd9_code"          # NOTE: BioMe column holds BOTH ICD-9 and ICD-10
+      icd_version_col: "code_type"          # values "ICD10" / "ICD9" — the source of truth
+      noted_date_col:  "noted_date"
+      resolved_col:    "resolved_date"
+      status_col:      "status"
+      date_format:     "%m/%d/%Y"
+      sep:             "|"
     family_history:
-      person_id_col:   "MRN"
-      relationship_col: "RELATIONSHIP"      # e.g. "MOTHER" / "PATERNAL_GRANDFATHER"
-      condition_col:    "CONDITION"         # free text or ICD/SNOMED code
-      condition_code_col: null              # optional coded column; if present, prefer
-      degree_col:       null                # optional numeric 1|2; else inferred from relationship
-      onset_age_col:    "AGE_AT_DIAGNOSIS"
-      sep:              "\t"
+      person_id_col:      "sample_name"
+      relationship_col:   "relation"        # free text: "Mother", "Maternal Grandfather", ...
+      condition_col:      "problem_description"  # free text: "Prostate Cancer", "Breast cancer"
+      condition_code_col: null              # BioMe famhx has NO ICD codes
+      degree_col:         null              # inferred from `relation` string
+      onset_age_col:      null
+      date_format:        "%m/%d/%Y"
+      sep:                "|"
     demographics:
-      person_id_col:      "MRN"
-      birth_year_col:     "BIRTH_YEAR"      # or "DATE_OF_BIRTH" -> parse year
-      sex_col:            "SEX"
-      enrollment_date_col: "ENROLLMENT_DATE"  # optional; used for incident-case flag
-      date_format:        "%Y-%m-%d"
-      sep:                "\t"
+      person_id_col:      "sample_name"
+      birth_year_col:     "birth_year"      # or full DOB column
+      sex_col:            "sex"
+      enrollment_date_col: "enrollment_date"  # optional; used for incident-case flag
+      date_format:        "%m/%d/%Y"
+      sep:                "|"
     phecodex_roster:
       # PheWas_MSM_phecodeX.tsv — wide (columns = phecodex codes) or long.
       format: "auto"                        # "wide" | "long" | "auto"
-      person_id_col: "MRN"
-      # for long format:
+      person_id_col: "sample_name"
       phecodex_col:  "phecodeX"
       value_col:     "case_control"         # 1=case, 0=ctrl, NA=undetermined
-      sep: "\t"
+      sep: "|"
 
   # Roster policy — see plan doc
   roster:
@@ -275,6 +283,15 @@ phenotype:
       - "myeloma"
       - "tumor"
       - "tumour"
+    # Cancer-type classification for free-text famhx (BioMe famhx has no codes).
+    # Case-insensitive substring match; first hit wins. Add per project.
+    cancer_type_patterns:
+      colorectal:  ["colon", "colorectal", "rectal", "rectum"]
+      breast:      ["breast"]
+      prostate:    ["prostate"]
+      lung:        ["lung", "bronchus"]
+      ovarian:     ["ovary", "ovarian"]
+      pancreatic:  ["pancreas", "pancreatic"]
 
 # --- Carrier matrix ---------------------------------------------------------
 carriers:

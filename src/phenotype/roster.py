@@ -26,6 +26,7 @@ from src.phenotype.cases import (
 )
 from src.phenotype.famhx import famhx_flags, read_family_history
 from src.phenotype.icd_mapping import IcdToPhecodeX
+from src.phenotype.vcf_samples import load_wes_samples
 
 
 def _phenotypes_dir(cfg: dict) -> Path:
@@ -124,10 +125,14 @@ def build(cfg: dict, out_dir: Path) -> None:
         ph_dir / files["family_history"],
         schema["family_history"],
         ph_cfg["famhx"]["cancer_free_text_patterns"],
+        ph_cfg["famhx"].get("cancer_type_patterns", {}),
         cancer_phecodes,
         mapper,
         ph_cfg["famhx"]["relative_degrees"],
     )
+
+    # --- WES sample list (for the "with genotype" overlap counts) ---
+    wes_samples = load_wes_samples(cfg)
 
     with (out_dir / "famhx.tsv").open("w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
@@ -161,10 +166,15 @@ def build(cfg: dict, out_dir: Path) -> None:
     case_lookup = {(c.person_id, c.cancer): c for c in cases}
     summary = Counter()
 
+    # Track counts per (cancer, group, subset) for cancer_counts.tsv.
+    # subset "" = all; "wes" = intersected with wes_samples.
+    counts: Counter = Counter()
+
     with (out_dir / "roster.tsv").open("w", newline="") as fh:
         w = csv.writer(fh, delimiter="\t")
         w.writerow([
             "person_id", "cancer", "group", "first_dx_date", "incident_flag",
+            "has_wes",
             "has_famhx_1deg_any_cancer", "has_famhx_2deg_any_cancer",
             "has_famhx_1deg_this_cancer", "has_famhx_2deg_this_cancer",
             "n_encounters", "excluded_from_control_reason",
@@ -184,21 +194,26 @@ def build(cfg: dict, out_dir: Path) -> None:
 
                 group = assign_group(is_case, has_fam)
 
-                # Additional control-cleanliness gate: another-cancer diagnosis
+                # Cross-cancer exclusion: a person with a DIFFERENT cancer isn't
+                # a case for this cancer, and shouldn't be counted as famhx or
+                # control here either — they're excluded from this cancer's
+                # roster entirely (control_exclusion=any_cancer).
                 reason = ""
-                if group == "control":
-                    if control_exclusion == "any_cancer" and pid in case_pids_any_cancer:
-                        # Person has some other cancer -> not a clean control for this cancer.
-                        group = "excluded"
-                        reason = "has_other_cancer"
-                    elif min_enc and enc_counts.get(pid, 0) < min_enc:
-                        group = "excluded"
-                        reason = "too_few_encounters"
+                if (not is_case
+                        and control_exclusion == "any_cancer"
+                        and pid in case_pids_any_cancer):
+                    group = "excluded"
+                    reason = "has_other_cancer"
+                elif group == "control" and min_enc and enc_counts.get(pid, 0) < min_enc:
+                    group = "excluded"
+                    reason = "too_few_encounters"
 
+                has_wes = pid in wes_samples
                 w.writerow([
                     pid, cancer, group,
                     (c.first_dx_date or "") if c else "",
                     "" if not c or c.incident_flag is None else int(c.incident_flag),
+                    int(has_wes),
                     int(fam_flags["has_famhx_1deg_any_cancer"]),
                     int(fam_flags["has_famhx_2deg_any_cancer"]),
                     int(fam_flags.get(f"has_famhx_1deg_{cancer}", False)),
@@ -207,6 +222,25 @@ def build(cfg: dict, out_dir: Path) -> None:
                     reason,
                 ])
                 summary[(cancer, group)] += 1
+
+                # Cancer-counts aggregation — dedupe per (person, cancer) automatically
+                # (one row per (pid, cancer)).
+                if is_case:
+                    counts[(cancer, "ehr_cases", "all")] += 1
+                    if has_wes:
+                        counts[(cancer, "ehr_cases", "wes")] += 1
+                if fam_flags["has_famhx_1deg_any_cancer"]:
+                    counts[(cancer, "famhx_1deg_any", "all")] += 1
+                    if has_wes:
+                        counts[(cancer, "famhx_1deg_any", "wes")] += 1
+                if fam_flags.get(f"has_famhx_1deg_{cancer}", False):
+                    counts[(cancer, "famhx_1deg_this", "all")] += 1
+                    if has_wes:
+                        counts[(cancer, "famhx_1deg_this", "wes")] += 1
+                if group == "control":
+                    counts[(cancer, "controls", "all")] += 1
+                    if has_wes:
+                        counts[(cancer, "controls", "wes")] += 1
 
     # --- Summary (aggregate counts only) ---
     with (out_dir / "roster_summary.md").open("w") as fh:
@@ -221,6 +255,34 @@ def build(cfg: dict, out_dir: Path) -> None:
                 f"| {summary[(cancer, 'control')]} "
                 f"| {summary[(cancer, 'excluded')]} |\n"
             )
+
+    # --- Cancer counts (the "clean table with the numbers") ---
+    # One row per cancer; columns dedup per participant.
+    with (out_dir / "cancer_counts.tsv").open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow([
+            "cancer",
+            "n_ehr_cases",
+            "n_ehr_cases_with_wes",
+            "n_famhx_1deg_any_cancer",
+            "n_famhx_1deg_any_cancer_with_wes",
+            "n_famhx_1deg_this_cancer",
+            "n_famhx_1deg_this_cancer_with_wes",
+            "n_controls",
+            "n_controls_with_wes",
+        ])
+        for cancer in cancer_phecodes:
+            w.writerow([
+                cancer,
+                counts[(cancer, "ehr_cases", "all")],
+                counts[(cancer, "ehr_cases", "wes")],
+                counts[(cancer, "famhx_1deg_any", "all")],
+                counts[(cancer, "famhx_1deg_any", "wes")],
+                counts[(cancer, "famhx_1deg_this", "all")],
+                counts[(cancer, "famhx_1deg_this", "wes")],
+                counts[(cancer, "controls", "all")],
+                counts[(cancer, "controls", "wes")],
+            ])
 
 
 def main() -> int:

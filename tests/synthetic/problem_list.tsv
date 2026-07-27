@@ -1,3 +1,3 @@
-MRN	ICD_CODE	ICD_VERSION	NOTED_DATE	RESOLVED_DATE	STATUS
-TEST_001	C18.7	10	2020-05-10		Active
-TEST_004	I10	10	2018-01-01		Active
+sample_name|description|noted_date|resolved_date|entry_date|hospital_pl_yn|principal_pl_yn|status|dx_name|icd9_code|code_type|encounter_date
+TEST_001|NA|05/10/2020|NA|12/06/2024|N|N|Active|Malignant neoplasm of sigmoid colon|C18.7|ICD10|12/14/2024
+TEST_004|NA|01/01/2018|NA|11/12/2010|N|N|Active|Essential hypertension|I10|ICD10|11/11/2010

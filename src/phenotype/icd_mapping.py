@@ -26,6 +26,17 @@ _BUILTIN_MAP: dict[str, list[tuple[str, str]]] = {
         # Breast
         ("C50",   "CA_105.1"),
         ("D05",   "CA_105.1"),      # carcinoma in situ breast
+        # Prostate
+        ("C61",   "CA_105.2"),
+        ("D07.5", "CA_105.2"),
+        # Lung
+        ("C33",   "CA_101.6"),
+        ("C34",   "CA_101.6"),
+        # Ovarian
+        ("C56",   "CA_105.3"),
+        ("D07.39", "CA_105.3"),
+        # Pancreatic
+        ("C25",   "CA_101.2"),
     ],
     "9": [
         # Colorectal
@@ -37,6 +48,15 @@ _BUILTIN_MAP: dict[str, list[tuple[str, str]]] = {
         ("174",   "CA_105.1"),
         ("175",   "CA_105.1"),
         ("233.0", "CA_105.1"),
+        # Prostate
+        ("185",   "CA_105.2"),
+        ("233.4", "CA_105.2"),
+        # Lung
+        ("162",   "CA_101.6"),
+        # Ovarian
+        ("183.0", "CA_105.3"),
+        # Pancreatic
+        ("157",   "CA_101.2"),
     ],
 }
 

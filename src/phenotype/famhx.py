@@ -90,10 +90,29 @@ def is_cancer_coded(code: str, mapper: IcdToPhecodeX,
     return phe if phe in cancer_phecodes_all else None
 
 
+def classify_cancer_type(text: str, type_patterns: dict[str, list[str]]) -> str | None:
+    """Map free-text condition ('Prostate Cancer') to a cancer-type key ('prostate').
+
+    Case-insensitive substring match; first cancer whose patterns hit wins.
+    Returns None if the text is not classifiable (still counts as any-cancer
+    via `is_cancer_free_text` upstream).
+    """
+    if not text:
+        return None
+    t = text.lower()
+    for cancer, patterns in type_patterns.items():
+        if any(p.lower() in t for p in patterns):
+            return cancer
+    return None
+
+
 # --- Aggregation ------------------------------------------------------------
 
 @dataclass
 class PersonFamHx:
+    """`cancer_by_degree[deg]` holds cancer-type keys, e.g. {'colorectal','breast'},
+    plus the sentinel '_ANY_CANCER' when a row was cancer-positive but not
+    classified to a specific type."""
     person_id: str
     n_affected_1deg: int = 0
     n_affected_2deg: int = 0
@@ -112,15 +131,25 @@ def read_family_history(
     path: str | Path,
     schema: dict,
     cancer_free_text_patterns: list[str],
+    cancer_type_patterns: dict[str, list[str]],
     cancer_phecodes: dict[str, list[str]],
     mapper: IcdToPhecodeX,
     relative_degrees: list[int],
 ) -> dict[str, PersonFamHx]:
-    """Parse Family_History.txt -> {person_id -> PersonFamHx}."""
+    """Parse Family_History.txt -> {person_id -> PersonFamHx}.
+
+    Detection order per row:
+      1. If a coded condition column is present and maps to a cancer phecodeX,
+         classify by phecodeX -> cancer key.
+      2. Else if free text matches a cancer_type_patterns entry, use that key.
+      3. Else if free text matches the generic cancer_free_text_patterns,
+         mark the row as `_ANY_CANCER` only.
+    """
     out: dict[str, PersonFamHx] = {}
     if not Path(path).exists():
         return out
     cancer_phecodes_all = {p for pcs in cancer_phecodes.values() for p in pcs}
+    phecodex_to_cancer = {phe: cancer for cancer, phes in cancer_phecodes.items() for phe in phes}
     with open(path, newline="") as fh:
         rdr = csv.DictReader(fh, delimiter=schema.get("sep", "\t"))
         pid_col = schema["person_id_col"]
@@ -145,16 +174,20 @@ def read_family_history(
             if deg not in relative_degrees:
                 continue
 
-            # Cancer?
-            matched_cancer_phes: set[str] = set()
+            # Cancer detection & classification
+            matched: set[str] = set()
             if code_col and row.get(code_col):
                 phe = is_cancer_coded(row[code_col], mapper, cancer_phecodes_all)
-                if phe:
-                    matched_cancer_phes.add(phe)
-            if not matched_cancer_phes:
-                if is_cancer_free_text(row.get(cond_col, ""), cancer_free_text_patterns):
-                    matched_cancer_phes.add("_ANY_CANCER")   # sentinel: any-cancer only
-            if not matched_cancer_phes:
+                if phe and phe in phecodex_to_cancer:
+                    matched.add(phecodex_to_cancer[phe])
+            if not matched:
+                cond_text = row.get(cond_col, "")
+                typed = classify_cancer_type(cond_text, cancer_type_patterns)
+                if typed:
+                    matched.add(typed)
+                elif is_cancer_free_text(cond_text, cancer_free_text_patterns):
+                    matched.add("_ANY_CANCER")
+            if not matched:
                 continue
 
             rec = out.setdefault(pid, PersonFamHx(pid))
@@ -162,17 +195,18 @@ def read_family_history(
                 rec.n_affected_1deg += 1
             else:
                 rec.n_affected_2deg += 1
-            rec.cancer_by_degree[deg].update(matched_cancer_phes)
+            rec.cancer_by_degree[deg].update(matched)
     return out
 
 
 def famhx_flags(rec: PersonFamHx | None, cancer_phecodes: dict[str, list[str]]
                 ) -> dict[str, bool | int]:
     """Convert a PersonFamHx into the flat flag dict for the roster."""
+    cancers = list(cancer_phecodes.keys())
     if rec is None:
         d = {"has_famhx_1deg_any_cancer": False, "has_famhx_2deg_any_cancer": False,
              "n_affected_1deg": 0, "n_affected_2deg": 0}
-        for cancer in cancer_phecodes:
+        for cancer in cancers:
             d[f"has_famhx_1deg_{cancer}"] = False
             d[f"has_famhx_2deg_{cancer}"] = False
         return d
@@ -182,8 +216,7 @@ def famhx_flags(rec: PersonFamHx | None, cancer_phecodes: dict[str, list[str]]
         "n_affected_1deg": rec.n_affected_1deg,
         "n_affected_2deg": rec.n_affected_2deg,
     }
-    for cancer, codes in cancer_phecodes.items():
-        code_set = set(codes)
-        d[f"has_famhx_1deg_{cancer}"] = any(c in code_set for c in rec.cancer_by_degree[1])
-        d[f"has_famhx_2deg_{cancer}"] = any(c in code_set for c in rec.cancer_by_degree[2])
+    for cancer in cancers:
+        d[f"has_famhx_1deg_{cancer}"] = cancer in rec.cancer_by_degree[1]
+        d[f"has_famhx_2deg_{cancer}"] = cancer in rec.cancer_by_degree[2]
     return d

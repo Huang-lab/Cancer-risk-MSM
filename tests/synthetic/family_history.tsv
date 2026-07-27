@@ -1,5 +1,8 @@
-MRN	RELATIONSHIP	CONDITION	AGE_AT_DIAGNOSIS
-TEST_003	MOTHER	Breast cancer	52
-TEST_003	FATHER	Hypertension
-TEST_004	MATERNAL_GRANDMOTHER	Colon cancer	68
-TEST_005	BROTHER	Type 2 diabetes
+sample_name|entry_date|problem_description|relation|encounter_date
+TEST_003|03/06/2017|Breast Cancer|Mother|03/06/2017
+TEST_003|03/06/2017|Hypertension|Father|03/06/2017
+TEST_004|09/13/2018|Colon Cancer|Father|09/13/2018
+TEST_005|04/08/2008|Diabetes|Brother|04/08/2008
+TEST_006|12/02/2018|Prostate Cancer|Brother|12/02/2018
+TEST_007|10/24/2017|Well|Daughter|10/24/2017
+TEST_007|10/24/2017|Cancer|Mother|10/24/2017
