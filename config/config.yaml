@@ -1,31 +1,63 @@
 # =============================================================================
 # Cancer-risk-MSM — single source of truth (paths + parameters, no data values)
-# All Minerva paths are placeholders/conventions. Fill/confirm on-cluster.
+#
+# SCOPE: this repo is the DOWNSTREAM layer. Variant annotation, P/LP
+# classification, and carrier extraction are owned by the Nextflow pipeline
+# `Huang-lab/germline-plp-carrier-nf`, whose outputs we consume read-only.
+# We own: sample QC, phenotyping, analysis-ready joins, and cancer-risk ML.
 # =============================================================================
 
 project:
   name: Cancer-risk-MSM
-  reference_build: GRCh38          # asserted by 00_confirm_build.sh
-  output_root: /sc/arion/projects/rg_huangk06/variants_PLP_MSM
+  reference_build: GRCh38
+  # Nested under the NF project dir so all MSM P/LP work lives together, but
+  # in its own subtree so the two pipelines never write to the same paths.
+  output_root: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/cancer_risk
 
-# --- Inputs (immutable, read-only) -------------------------------------------
+# --- Inputs (all read-only) --------------------------------------------------
 inputs:
   msm_data_root: /sc/arion/projects/MSM/data
 
+  # Raw WES pVCF chunks — used ONLY for sample-level QC (missingness, kinship,
+  # sex-check) and to enumerate which samples have genotypes. Annotation is
+  # NOT our job; germline-plp-carrier-nf handles that.
   wes:
-    # Auto-resolve highest batch under wes.pvcf_target_glob, or pin explicitly.
     pvcf_target_glob: "WES/combined/batch_*/pVCF/Target"
     batch: null                    # null -> auto-select highest batch_###
     chunk_glob: "*.vcf.gz"
-    expected_chunks: 498           # sanity check; not enforced
-    # Plain-text list of WES sample IDs (one per line) from `bcftools query -l`
-    # on any pVCF chunk. Produced by workflow/09_export_wes_samples.sh.
-    sample_list_file: null         # e.g. $OUTPUT_ROOT/resources/wes_samples.txt
+    expected_chunks: 498
+    # Plain-text list of WES sample IDs from `bcftools query -l`.
+    # Produced by workflow/09_export_wes_samples.sh.
+    sample_list_file: null         # e.g. <output_root>/resources/wes_samples.txt
+
+  # Outputs of germline-plp-carrier-nf that we consume.
+  carrier_source:
+    nf_results_root: /sc/arion/projects/rg_huangk06/variants_PLP_MSM
+    # One or more NF run-output dirs to pool. Confirm which are authoritative.
+    results_dirs:
+      - results-batch1
+      - results-batch2
+      - results-batch3
+    carrier_matrix: "carriers/carrier_matrix.tsv"   # long: variant x person
+    variants_dir:   "variants"                      # clinvar_plp / acmg_plp / am_plp / qc_per_gene
+    manifest:       "manifest.json"                 # ref build + tool versions + pipeline SHA
+    # Column names in NF's carrier_matrix.tsv (adjust if NF changes its schema).
+    columns:
+      person_id:       "person_id"
+      chrom:           "chr"
+      pos:             "pos"
+      ref:             "ref"
+      alt:             "alt"
+      gene:            "gene"
+      is_clinvar_plp:  "is_clinvar_PLP"
+      is_acmg_plp:     "is_acmg_PLP"
+      is_am_plp:       "is_AM_PLP"
+    sep: "\t"
 
   common_variants:
     root_glob: "common_variants/combined/batch_*"
-    batch: null                    # null -> auto-select highest
-    pca_file: "pca/pcs.tsv"        # path relative to batch root; contains ancestry PCs
+    batch: null
+    pca_file: "pca/pcs.tsv"
     kinship_file: "kinship/kinship.tsv"
 
   phenotypes:
@@ -44,82 +76,40 @@ inputs:
       ob_history:          "OB_HISTORY.txt"
       health_maintenance_glob: "HEALTH_MAINTENANCE_*.txt"
 
-# --- Reference resources (Minerva paths — reuse BioMe staging if present) ----
+# --- Reference resources ----------------------------------------------------
+# Only what sample QC needs. VEP cache / ClinVar / gnomAD / AlphaMissense /
+# ANNOVAR are the NF pipeline's concern and live under its refs/ dir.
 resources:
-  fasta: /sc/arion/projects/rg_huangk06/refs/GRCh38/GRCh38.primary_assembly.genome.fa
-  vep:
-    cache_dir: /sc/arion/projects/rg_huangk06/refs/vep/cache
-    cache_version: 112             # confirm on cluster
-    assembly: GRCh38
-    species: homo_sapiens
-    fork: 4                        # threads per chunk (matches LSF -n)
-  loftee:
-    plugin_dir: /sc/arion/projects/rg_huangk06/refs/vep/plugins/loftee
-    human_ancestor_fa: /sc/arion/projects/rg_huangk06/refs/loftee/human_ancestor.fa.gz
-    conservation_file: /sc/arion/projects/rg_huangk06/refs/loftee/loftee.sql
-  alphamissense:
-    plugin_dir: /sc/arion/projects/rg_huangk06/refs/vep/plugins/alphamissense
-    scores_tsv_gz: /sc/arion/projects/rg_huangk06/refs/alphamissense/AlphaMissense_hg38.tsv.gz
-    # Chen/Pejaver gene-specific evidence-label calibration table (mirrors
-    # Huang-lab/Biome-alphamissense-calibration). TSV: gene, threshold, evidence_label.
-    calibration_table: /sc/arion/projects/rg_huangk06/refs/alphamissense/gene_calibration.tsv
-  clinvar:
-    # Auto-resolve latest dated release folder (e.g. clinvar/2026-07-01/).
-    root: /sc/arion/projects/rg_huangk06/refs/clinvar
-    release: latest                # "latest" -> pick newest yyyy-mm-dd subdir
-    vcf_basename: "clinvar.vcf.gz"
-    fields: [CLNSIG, CLNREVSTAT, CLNDN, CLNVI]
-  gnomad:
-    vcf: /sc/arion/projects/rg_huangk06/refs/gnomad/v4/gnomad.exomes.v4.sites.vcf.bgz
-    af_field: AF                   # for --custom AF annotation
-    popmax_field: AF_popmax
-  dbnsfp:
-    tsv_gz: /sc/arion/projects/rg_huangk06/refs/dbnsfp/dbNSFP4.7a.txt.gz   # optional
-  # ANNOVAR + InterVar for the ACMG track (referenced, not vendored)
-  annovar:
-    root: /sc/arion/projects/rg_huangk06/tools/annovar
-    humandb: /sc/arion/projects/rg_huangk06/refs/annovar/humandb
-    buildver: hg38
-  intervar:
-    root: /sc/arion/projects/rg_huangk06/tools/InterVar
-    config: /sc/arion/projects/rg_huangk06/tools/InterVar/config.ini
+  refs_root: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/refs
+  fasta: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/refs/GRCh38/GRCh38.primary_assembly.genome.fa
 
-# --- QC (site/genotype and sample-level) -------------------------------------
+# --- QC (sample-level; site/GT masking only as a pre-step for kinship) -------
 qc:
-  # Site + genotype QC (per chunk, applied between bcftools norm and VEP)
+  # Genotype masking applied before kinship/PCA so low-confidence calls don't
+  # skew relatedness. Mirrors germline-plp-carrier-nf's NORM_QC thresholds.
   site_gt:
-    keep_filter: PASS               # keep only VQSR/GATK PASS sites
-    genotype_dp_min: 10             # null genotypes with DP<10
-    genotype_gq_min: 20             # null genotypes with GQ<20
-    genotype_ab_het_min: 0.20       # het ABmin: alt/(ref+alt) >= 0.20
-    genotype_ab_het_max: 0.80       # het ABmax: alt/(ref+alt) <= 0.80
-    site_missing_max: 0.10          # drop sites with >10% missing after masking
+    keep_filter: PASS
+    genotype_dp_min: 10
+    genotype_gq_min: 20
+    genotype_ab_het_min: 0.20
+    genotype_ab_het_max: 0.80
+    site_missing_max: 0.10
     drop_monoallelic_after_mask: true
 
-  # Sample QC (computed FROM THE VCFs, post-site/GT QC; emits sample_keep_list.tsv)
+  # Sample QC computed FROM the raw pVCFs (no annotation needed for any of it).
   sample:
-    # 1. Missingness — aggregated per-sample from bcftools stats PSC lines.
-    missingness_max: 0.05           # drop samples with >5% variant missingness
-
-    # 2. Sex-check — plink2 --check-sex F-stat on chrX non-PAR extracted from WES.
-    #    Reported sex read from phenotypes.demographics; F-stat thresholds below.
+    missingness_max: 0.05
     sex_check:
       enabled: true
-      f_stat_female_max: 0.20       # F < 0.20 -> female
-      f_stat_male_min: 0.80         # F > 0.80 -> male
+      f_stat_female_max: 0.20
+      f_stat_male_min: 0.80
       mismatch_action: flag         # "flag" | "exclude"
-
-    # 3. Contamination — het/hom outlier as a VCF-only proxy (no BAM/CRAM needed).
-    #    True contamination scoring (VerifyBamID2) requires BAMs and is optional.
     contamination_proxy:
-      het_hom_z_max: 4.0            # |z| > 4 over cohort het/hom distribution -> flag
+      het_hom_z_max: 4.0
     contamination_verifybamid:
-      enabled: false                # set true if a VerifyBamID2 summary is on cluster
+      enabled: false
       verifybamid_summary: null
       freemix_max: 0.03
-
-    # 4. Kinship — plink2 --make-king on autosomal, LD-pruned, MAF>0.01 variants
-    #    extracted from the annotated WES VCFs (self-contained, VCF-only).
     kinship:
       wes_kinship_inputs:
         maf_min: 0.01
@@ -129,35 +119,13 @@ qc:
         ld_step: 50
         ld_r2_max: 0.2
         threads: 16
-      duplicate_kin_min: 0.354      # >=0.354 -> MZ-twin / duplicate; keep one
-      pi_hat_related_max: 0.1875    # >= 2nd-degree; kept but flagged, ML uses cluster-CV
-      keep_strategy: highest_call_rate   # among duplicates, keep the sample with fewest missing
+      duplicate_kin_min: 0.354      # MZ-twin / duplicate; keep one
+      pi_hat_related_max: 0.1875    # >= 2nd-degree; kept but flagged
+      keep_strategy: highest_call_rate
 
-# --- Classification thresholds ----------------------------------------------
-classification:
-  scope: genome_wide               # annotate + classify all genes; panel is reporting only
-  clinvar:
-    plp_terms:     ["Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic"]
-    blb_terms:     ["Benign", "Likely_benign", "Benign/Likely_benign"]
-    min_review_stars: 2            # >= 2 gold stars (criteria_provided_multiple_submitters or better)
-  acmg:
-    # ANNOVAR+InterVar rule-based P/LP; then remove any variant ClinVar calls B/LB.
-    remove_if_clinvar_blb: true
-    pm2_af_max: 0.0001             # ~AF<=1e-4 popmax by default
-    pvs1_lof_gene_list: null       # optional path to LoF-intolerant gene list (defaults to InterVar's)
-  alphamissense:
-    strategy: gene_specific_only   # per user: mirror Biome-alphamissense-calibration
-    min_evidence_strength: Moderate    # PP3_Moderate or stronger promotes; Supporting does NOT
-    record_domain_aggregate: true       # recorded, never promotes carrier
-  qc:
-    paralog_genes: [PMS2, PMS2CL, CHEK2, NBN, SDHA]  # extra artifact scrutiny
-    gnomad_inflation_ratio_max: 10.0                 # flag genes with cohort/gnomAD carrier freq >10x
-
-# --- Focus gene panel (reporting/QC only; annotation is genome-wide) ---------
+# --- Focus gene panel (reporting / stratification only) ----------------------
 gene_panels:
   cancer_predisposition_28:
-    # Placeholder: user to confirm exact list from prior BioMe work.
-    # Common cancer-predisposition genes as a starting reporting panel.
     genes:
       - APC
       - ATM
@@ -192,26 +160,23 @@ gene_panels:
 lsf:
   queue: premium
   project: acc_MSM                 # confirm on cluster
-  walltime: "24:00"
-  memory_mb: 16000                 # per slot; scaled by -n = vep.fork
-  array_concurrency_cap: 50        # bsub -J "vep[1-N]%50"
-  modules:                          # Lmod modules to load in workers
+  walltime: "12:00"
+  memory_mb: 16000
+  array_concurrency_cap: 50
+  modules:
     - bcftools/1.19
     - htslib/1.19
-    - samtools/1.19
-    - ensembl-vep/112
-    - annovar/2020Jun08
+    - plink2
     - python/3.11
 
 # --- Phenotyping ------------------------------------------------------------
 phenotype:
-  # ICD -> phecodeX map. If null, uses the small built-in cancer-only map in
-  # src/phenotype/icd_mapping.py (enough for CRC + breast; extend on cluster).
-  icd_to_phecodex_map: null   # e.g. /sc/arion/projects/rg_huangk06/refs/phecodeX/icd_to_phecodeX.tsv
+  # ICD -> phecodeX map. If null, uses the built-in cancer map in
+  # src/phenotype/icd_mapping.py (CRC, breast, prostate, lung, ovarian, pancreatic).
+  icd_to_phecodex_map: null
 
   cancer_phecodes:
-    # phecodeX codes below are placeholders — confirm on cluster with the actual
-    # phecodeX v1.2 map. The pipeline groups counts by these cancer keys.
+    # phecodeX codes are placeholders — confirm against the real phecodeX v1.2 map.
     colorectal:  ["CA_101.1", "CA_101.11"]
     breast:      ["CA_105.1"]
     prostate:    ["CA_105.2"]              # TODO confirm
@@ -230,8 +195,8 @@ phenotype:
       sep:             "|"
     problem_list:
       person_id_col:   "sample_name"
-      icd_col:         "icd9_code"          # NOTE: BioMe column holds BOTH ICD-9 and ICD-10
-      icd_version_col: "code_type"          # values "ICD10" / "ICD9" — the source of truth
+      icd_col:         "icd9_code"          # NOTE: holds BOTH ICD-9 and ICD-10
+      icd_version_col: "code_type"          # the source of truth for version
       noted_date_col:  "noted_date"
       resolved_col:    "resolved_date"
       status_col:      "status"
@@ -239,37 +204,34 @@ phenotype:
       sep:             "|"
     family_history:
       person_id_col:      "sample_name"
-      relationship_col:   "relation"        # free text: "Mother", "Maternal Grandfather", ...
-      condition_col:      "problem_description"  # free text: "Prostate Cancer", "Breast cancer"
+      relationship_col:   "relation"        # free text: "Mother", "Maternal Grandfather"
+      condition_col:      "problem_description"  # free text: "Prostate Cancer"
       condition_code_col: null              # BioMe famhx has NO ICD codes
-      degree_col:         null              # inferred from `relation` string
+      degree_col:         null              # inferred from `relation`
       onset_age_col:      null
       date_format:        "%m/%d/%Y"
       sep:                "|"
     demographics:
       person_id_col:      "sample_name"
-      birth_year_col:     "birth_year"      # or full DOB column
+      birth_year_col:     "birth_year"
       sex_col:            "sex"
-      enrollment_date_col: "enrollment_date"  # optional; used for incident-case flag
+      enrollment_date_col: "enrollment_date"
       date_format:        "%m/%d/%Y"
       sep:                "|"
     phecodex_roster:
-      # PheWas_MSM_phecodeX.tsv — wide (columns = phecodex codes) or long.
       format: "auto"                        # "wide" | "long" | "auto"
       person_id_col: "sample_name"
       phecodex_col:  "phecodeX"
-      value_col:     "case_control"         # 1=case, 0=ctrl, NA=undetermined
+      value_col:     "case_control"
       sep: "|"
 
-  # Roster policy — see plan doc
   roster:
     famhx_scope: any_cancer                 # any_cancer | cancer_specific
     control_exclusion: any_cancer           # any_cancer | this_cancer_only
     emit_prevalent_cases: true              # keep with incident_flag=false
-    min_control_encounters: 2               # >=N EHR encounters -> qualifies as active member
+    min_control_encounters: 2
   famhx:
-    relative_degrees: [1, 2]                # 1st- and 2nd-degree relatives
-    # Free-text cancer patterns matched (case-insensitive) if condition is not coded.
+    relative_degrees: [1, 2]
     cancer_free_text_patterns:
       - "cancer"
       - "malignant"
@@ -283,8 +245,7 @@ phenotype:
       - "myeloma"
       - "tumor"
       - "tumour"
-    # Cancer-type classification for free-text famhx (BioMe famhx has no codes).
-    # Case-insensitive substring match; first hit wins. Add per project.
+    # Free-text -> cancer-type classification (BioMe famhx has no codes).
     cancer_type_patterns:
       colorectal:  ["colon", "colorectal", "rectal", "rectum"]
       breast:      ["breast"]
@@ -293,12 +254,14 @@ phenotype:
       ovarian:     ["ovary", "ovarian"]
       pancreatic:  ["pancreas", "pancreatic"]
 
-# --- Carrier matrix ---------------------------------------------------------
+# --- Carrier consumption (NF output -> analysis features) -------------------
 carriers:
-  format: long                      # per user: one row per variant x person
-  columns: [chr, pos, ref, alt, gene, person_id, is_clinvar_PLP, is_acmg_PLP, is_AM_PLP]
-  carrier_definition: any_alt       # >=1 qualifying allele
-  emit_wide_pivot: true             # also emit sample x gene wide matrix for ML
+  # NF emits long format (one row per variant x person). We aggregate to
+  # per-person / per-gene features for ML.
+  frameworks: [clinvar, acmg, am]           # which P/LP calls to build features from
+  emit_wide_pivot: true                     # sample x gene matrix
+  restrict_to_sample_keep_list: true        # use results/qc/sample_keep_list.tsv
+  panel_for_aggregate: cancer_predisposition_28
 
 # --- ML ---------------------------------------------------------------------
 ml:

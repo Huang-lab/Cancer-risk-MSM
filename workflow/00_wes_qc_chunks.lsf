@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# LSF array over annotated chunks: per-chunk `bcftools stats -s -` output.
-# Runs AFTER Step 1 (annotation) so it operates on the site/GT-QC'd VCFs.
+# LSF array over RAW WES pVCF chunks: per-chunk `bcftools stats -s -`.
 #
-# Outputs: $OUTPUT_ROOT/results/qc/stats/<chunk>.stats.txt (one per chunk)
+# Sample QC needs genotypes only, not annotations — so we read the immutable
+# source pVCFs directly rather than waiting on germline-plp-carrier-nf.
+#
+# Outputs: <output_root>/results/qc/stats/<chunk>.stats.txt (one per chunk)
 # =============================================================================
 set -euo pipefail
 
@@ -17,9 +19,14 @@ STATS_DIR="$OUTPUT_ROOT/results/qc/stats"
 LSF_LOG_DIR="$OUTPUT_ROOT/logs/qc/lsf"
 mkdir -p "$STATS_DIR" "$LSF_LOG_DIR"
 
-# List annotated chunks
-CHUNK_LIST="$OUTPUT_ROOT/logs/qc/annotated_chunks.list"
-ls "$OUTPUT_ROOT/data/annotated"/*.annot.vcf.gz > "$CHUNK_LIST"
+# Enumerate the raw pVCF Target chunks from config (auto-resolves latest batch).
+CHUNK_LIST="$OUTPUT_ROOT/logs/qc/pvcf_chunks.list"
+python -c "
+from src.common.config import load, resolve
+r = resolve(load('$CONFIG'))
+open('$CHUNK_LIST','w').write('\n'.join(str(p) for p in r.wes_chunks) + '\n')
+print(f'{len(r.wes_chunks)} chunks from {r.wes_target_dir}')
+"
 N=$(wc -l < "$CHUNK_LIST")
 echo "Chunks to stat: $N"
 
@@ -33,7 +40,7 @@ bsub \
     set -euo pipefail
     module load bcftools/1.19 || true
     VCF=$(sed -n "${LSB_JOBINDEX}p" '"$CHUNK_LIST"')
-    OUT='"$STATS_DIR"'/$(basename "$VCF" .annot.vcf.gz).stats.txt
+    OUT='"$STATS_DIR"'/$(basename "$VCF" .vcf.gz).stats.txt
     if [[ -s "$OUT" ]]; then echo "SKIP $OUT"; exit 0; fi
     bcftools stats -s - "$VCF" > "$OUT"
   '

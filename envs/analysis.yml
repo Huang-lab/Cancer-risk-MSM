@@ -4,6 +4,10 @@ channels:
   - bioconda
 dependencies:
   - python=3.11
+  # Sample QC needs genotype-level tooling (annotation is germline-plp-carrier-nf's job)
+  - bcftools=1.19
+  - htslib=1.19
+  - plink2
   - pandas=2.2.*
   - numpy=1.26.*
   - scipy=1.13.*

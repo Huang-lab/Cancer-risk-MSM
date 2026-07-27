@@ -15,13 +15,17 @@ import yaml
 
 @dataclass
 class Resolved:
-    """Concrete Minerva paths after auto-resolution."""
+    """Concrete Minerva paths after auto-resolution.
+
+    Note: reference resources for annotation (VEP cache, ClinVar, gnomAD,
+    AlphaMissense) are NOT resolved here — germline-plp-carrier-nf owns
+    annotation. We only resolve inputs this repo actually reads.
+    """
 
     wes_target_dir: Path
     wes_chunks: list[Path]
     common_variants_dir: Path
     phenotypes_dir: Path
-    clinvar_vcf: Path
 
 
 def load(config_path: str | os.PathLike) -> dict[str, Any]:
@@ -85,16 +89,9 @@ def resolve(cfg: dict) -> Resolved:
         else _newest_dated_dir(ph_root)
     )
 
-    # ClinVar release (latest yyyy-mm-dd subdir)
-    cv_root = Path(cfg["resources"]["clinvar"]["root"])
-    release = cfg["resources"]["clinvar"]["release"]
-    clinvar_dir = _newest_dated_dir(cv_root) if release == "latest" else cv_root / release
-    clinvar_vcf = clinvar_dir / cfg["resources"]["clinvar"]["vcf_basename"]
-
     return Resolved(
         wes_target_dir=wes_target,
         wes_chunks=chunks,
         common_variants_dir=cv_dir,
         phenotypes_dir=ph_dir,
-        clinvar_vcf=clinvar_vcf,
     )
