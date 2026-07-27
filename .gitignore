@@ -68,6 +68,12 @@ SINAI-Million_*
 !config/**/*.yml
 !config/**/*.json.example
 
+# --- Re-ignore auto-generated config (must come AFTER the whitelist above,
+#     since gitignore is last-match-wins). Contains per-run counts derived
+#     from protected data and absolute Minerva paths. -------------------------
+config/discovered_results.yaml
+config/discovered_results.json
+
 # --- Envs, caches, editor cruft ----------------------------------------------
 __pycache__/
 *.py[cod]
