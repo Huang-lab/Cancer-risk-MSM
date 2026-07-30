@@ -1,0 +1,6 @@
+sample_name|smoking_status|alcohol_use|encounter_date
+TEST_001|Former smoker|Never|03/01/2018
+TEST_001|Current smoker|Occasional|06/15/2021
+TEST_003|Never smoker|Social|01/10/2020
+TEST_004|Current Smoker|Heavy|05/05/2019
+TEST_007|unknown|No|02/02/2022

@@ -1,0 +1,5 @@
+sample_name|parity|age_at_first_birth|encounter_date
+TEST_002|2|27|01/01/2015
+TEST_002|3|27|06/01/2019
+TEST_003|0||02/02/2018
+TEST_007|1|31|03/03/2020

@@ -1,0 +1,7 @@
+sample_name	cancer_type	age_at_dx	has_genetics
+TEST_001	Colon adenocarcinoma	61	1
+TEST_002	Breast cancer	48	1
+TEST_002	Invasive ductal carcinoma of breast	48	1
+TEST_005	Rectal cancer	70	0
+TEST_006	Prostate cancer	72	1
+TEST_009	Some Rare Thing	55	1

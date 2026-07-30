@@ -67,6 +67,17 @@ inputs:
     pca_file: "pca/pcs.tsv"
     kinship_file: "kinship/kinship.tsv"
 
+  # Pre-built cancer case list (EHR + genetics combined). This is the AUTHORITATIVE
+  # case definition — controls are derived as a set-difference from it, not
+  # re-derived from ICD codes. Schema is auto-detected apart from the ID column.
+  cancer_cases:
+    path: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/test/Cancers_ehr_genetics_combined_batch1.tsv
+    person_id_col: "sample_name"
+    # Column naming the cancer type. null -> auto-detect from a candidate list
+    # (cancer, cancer_type, primary_site, phenotype, diagnosis, ...).
+    cancer_type_col: null
+    sep: "\t"
+
   phenotypes:
     root_glob: "phenotypes/*"      # yyyy-mm-dd folders; picks latest by name
     date: null                     # null -> latest date folder
@@ -189,6 +200,47 @@ phenotype:
       phecodex_col:  "phecodeX"
       value_col:     "case_control"
       sep: "|"
+    social_history:                         # lifestyle: smoking / alcohol
+      person_id_col:      "sample_name"
+      smoking_status_col: "smoking_status"  # auto-detected if absent
+      alcohol_col:        "alcohol_use"
+      date_col:           "encounter_date"
+      date_format:        "%m/%d/%Y"
+      sep:                "|"
+    vitals:                                 # BMI (closest-to-index measurement)
+      person_id_col: "sample_name"
+      bmi_col:       "bmi"                  # else derived from height+weight
+      height_col:    "height"
+      weight_col:    "weight"
+      date_col:      "encounter_date"
+      date_format:   "%m/%d/%Y"
+      sep:           "|"
+    ob_history:                             # parity / age at first birth (breast model)
+      person_id_col:          "sample_name"
+      parity_col:             "parity"
+      age_at_first_birth_col: "age_at_first_birth"
+      date_col:               "encounter_date"
+      date_format:            "%m/%d/%Y"
+      sep:                    "|"
+
+# --- Cohort assembly (case / control / famhx / lifestyle) --------------------
+cohort:
+  # Universe of people eligible to be controls. "demographics" is the biobank
+  # roster; "union" pools every EHR source seen.
+  roster_source: demographics             # demographics | union
+  # Belt-and-braces: also screen ICD codes so someone with a cancer diagnosis
+  # that is absent from the case file cannot land in the control group.
+  screen_icd_for_cancer: true
+  min_control_encounters: 0               # 0 disables the encounter-count filter
+  # Free-text/coded normalization for lifestyle fields.
+  smoking_map:
+    never:   ["never", "never smoker", "non-smoker", "nonsmoker", "0"]
+    former:  ["former", "former smoker", "quit", "ex-smoker", "previous"]
+    current: ["current", "current smoker", "every day", "some days", "yes", "smoker"]
+  alcohol_map:
+    never:   ["never", "no", "none", "non-drinker", "0"]
+    former:  ["former", "quit", "previous"]
+    current: ["current", "yes", "occasional", "social", "moderate", "heavy", "daily"]
 
   roster:
     famhx_scope: any_cancer                 # any_cancer | cancer_specific
