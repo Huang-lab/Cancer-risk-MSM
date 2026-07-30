@@ -187,41 +187,64 @@ phenotype:
       onset_age_col:      null
       date_format:        "%m/%d/%Y"
       sep:                "|"
-    demographics:
-      person_id_col:      "sample_name"
-      birth_year_col:     "birth_year"
-      sex_col:            "sex"
-      enrollment_date_col: "enrollment_date"
-      date_format:        "%m/%d/%Y"
-      sep:                "|"
+    demographics:                           # 89,764 rows — the cohort roster
+      person_id_col:       "sample_name"
+      birth_year_col:      "birth_date"     # full DOB; the year is parsed out
+      sex_col:             "gender"
+      race_col:            "self_reported_race"
+      ancestry_col:        "ancestry"
+      death_date_col:      "death_date"     # for censoring / follow-up
+      qc_status_col:       "qc_status"
+      enrollment_date_col: "msm_enrl_dt"    # biome_enrl_dt also present
+      date_format:         "%m/%d/%Y"
+      sep:                 "|"
     phecodex_roster:
       format: "auto"                        # "wide" | "long" | "auto"
       person_id_col: "sample_name"
       phecodex_col:  "phecodeX"
       value_col:     "case_control"
       sep: "|"
-    social_history:                         # lifestyle: smoking / alcohol
-      person_id_col:      "sample_name"
-      smoking_status_col: "smoking_status"  # auto-detected if absent
-      alcohol_col:        "alcohol_use"
-      date_col:           "encounter_date"
-      date_format:        "%m/%d/%Y"
-      sep:                "|"
-    vitals:                                 # BMI (closest-to-index measurement)
-      person_id_col: "sample_name"
-      bmi_col:       "bmi"                  # else derived from height+weight
-      height_col:    "height"
-      weight_col:    "weight"
-      date_col:      "encounter_date"
+    social_history:                         # 4,925,136 rows, 36 cols, wide
+      person_id_col:       "sample_name"
+      smoking_status_col:  "TOBACCO_USER"
+      alcohol_col:         "IS_ALCOHOL_USER"
+      # Extra lifestyle detail available in this file:
+      smoking_years_col:   "TOBACCO_USED_YEARS"
+      smoking_ppd_col:     "TOBACCO_PAK_PER_DY"   # pack-years = ppd x years
+      smoking_quit_col:    "SMOKING_QUIT_DATE"
+      alcohol_oz_wk_col:   "ALCOHOL_OZ_PER_WK"
+      education_years_col: "YEARS_EDUCATION"      # SES proxy
+      date_col:            "encounter_date"
+      date_format:         "%m/%d/%Y"
+      sep:                 "|"
+
+    vitals:                                 # 83,850,708 rows — LONG and HEADERLESS
+      # No header row: columns are addressed positionally, in file order.
+      has_header: false
+      columns: ["sample_name", "measure_type", "value", "unit",
+                "encounter_date", "entry_date"]
+      person_id_col:    "sample_name"
+      measure_type_col: "measure_type"
+      value_col:        "value"
+      date_col:         "encounter_date"
+      # Values of measure_type to match (case-insensitive substring).
+      # TODO(user): confirm against the measure_type value counts.
+      bmi_labels:    ["BMI", "Body mass index"]
+      height_labels: ["Height"]
+      weight_labels: ["Weight"]
       date_format:   "%m/%d/%Y"
       sep:           "|"
-    ob_history:                             # parity / age at first birth (breast model)
-      person_id_col:          "sample_name"
-      parity_col:             "parity"
-      age_at_first_birth_col: "age_at_first_birth"
-      date_col:               "encounter_date"
-      date_format:            "%m/%d/%Y"
-      sep:                    "|"
+
+    ob_history:                             # 32,333 rows — LONG, one row per outcome
+      person_id_col:     "sample_name"
+      outcome_date_col:  "ob_hx_outcome_dt"
+      outcome_code_col:  "ob_hx_outcome_c"
+      # Parity = count of live-birth outcomes; age at first birth is derived
+      # from the earliest live-birth date minus birth_date.
+      # TODO(user): confirm which codes mean live birth from the value counts.
+      live_birth_codes:  []                 # empty -> count every outcome row
+      date_format:       "%m/%d/%Y"
+      sep:               "|"
 
 # --- Cohort assembly (case / control / famhx / lifestyle) --------------------
 cohort:

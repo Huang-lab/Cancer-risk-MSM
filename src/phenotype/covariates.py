@@ -57,15 +57,23 @@ def _nullish(v: str | None) -> bool:
 
 
 def _pick(cols: list[str], candidates: list[str]) -> str | None:
+    """First matching column: exact, then case-insensitive, then substring.
+
+    Falsy candidates are dropped first. Callers routinely pass
+    `schema.get("x_col", "")`, and an empty string would substring-match the
+    very first column (`"" in anything` is True), silently binding the wrong
+    field and, worse, making an absent config key look present.
+    """
+    cands = [c for c in candidates if c]
     lower = {c.lower(): c for c in cols}
-    for cand in candidates:
+    for cand in cands:
         if cand in cols:
             return cand
-        if cand in lower:
-            return lower[cand]
-    for cand in candidates:
+        if cand.lower() in lower:
+            return lower[cand.lower()]
+    for cand in cands:
         for c in cols:
-            if cand in c.lower():
+            if cand.lower() in c.lower():
                 return c
     return None
 
@@ -241,17 +249,125 @@ def _latest_category(rows: list[tuple[date | None, str]], idx: date | None,
 
 # --- Vitals (BMI) -----------------------------------------------------------
 
+def _matches(value: str, labels: list[str]) -> bool:
+    v = (value or "").strip().lower()
+    return bool(v) and any(lab.strip().lower() in v for lab in labels if lab)
+
+
+def open_rows(path: Path, schema: dict):
+    """Yield dict rows, supporting headerless files via positional `columns`.
+
+    Some MSM extracts (Vitals) ship with no header. Setting
+    `has_header: false` plus a `columns:` list addresses fields by position
+    instead of letting csv.DictReader consume row 1 as the header.
+    """
+    sep = schema.get("sep", "|")
+    if schema.get("has_header", True):
+        with path.open(newline="") as fh:
+            yield from csv.DictReader(fh, delimiter=sep)
+    else:
+        names = schema.get("columns") or []
+        with path.open(newline="") as fh:
+            for rec in csv.reader(fh, delimiter=sep):
+                yield {names[i]: rec[i] for i in range(min(len(names), len(rec)))}
+
+
 def read_bmi(path: str | Path, schema: dict,
              index_dates: dict[str, date] | None = None,
              ) -> dict[str, tuple[float | None, date | None]]:
-    """{person_id -> (bmi, measurement_date)}, closest pre-index measurement."""
+    """{person_id -> (bmi, measurement_date)} from a LONG vitals table.
+
+    The real Vitals extract is ~84M rows in long form (one row per
+    measurement, with a `measure_type` column) and has no header. Rather than
+    accumulate every row, this keeps only the current best candidate per
+    person while streaming, so memory scales with the number of people rather
+    than the number of rows.
+
+    Height/weight rows are retained only when no direct BMI row exists for
+    that person, since a recorded BMI beats a derived one.
+    """
     out: dict[str, tuple[float | None, date | None]] = {}
     p = Path(path)
     if not p.exists():
         return out
     index_dates = index_dates or {}
-    rows_by_pid: dict[str, list[tuple[date | None, float]]] = {}
 
+    type_col = schema.get("measure_type_col")
+    if not type_col:                      # wide layout — fall back to columns
+        return _read_bmi_wide(p, schema, index_dates)
+
+    pid_col = schema.get("person_id_col", "sample_name")
+    val_col = schema.get("value_col", "value")
+    date_col = schema.get("date_col")
+    fmt = schema.get("date_format", "%m/%d/%Y")
+    bmi_labels = schema.get("bmi_labels", ["BMI"])
+    h_labels = schema.get("height_labels", ["Height"])
+    w_labels = schema.get("weight_labels", ["Weight"])
+
+    # best[pid] = (date, bmi); hw[pid] = {"h": (date, val), "w": (date, val)}
+    best: dict[str, tuple[date | None, float]] = {}
+    hw: dict[str, dict[str, tuple[date | None, float]]] = {}
+
+    def _better(pid: str, d: date | None, v: float) -> bool:
+        """Keep the latest admissible measurement (strictly pre-index if known)."""
+        idx = index_dates.get(pid)
+        if idx is not None and (d is None or d >= idx):
+            return False
+        cur = best.get(pid)
+        if cur is None:
+            return True
+        cur_d = cur[0]
+        if d is None:
+            return False
+        return cur_d is None or d > cur_d
+
+    for row in open_rows(p, schema):
+        pid = (row.get(pid_col) or "").strip()
+        if not pid:
+            continue
+        mtype = row.get(type_col) or ""
+        is_bmi = _matches(mtype, bmi_labels)
+        is_h = (not is_bmi) and _matches(mtype, h_labels)
+        is_w = (not is_bmi) and (not is_h) and _matches(mtype, w_labels)
+        if not (is_bmi or is_h or is_w):
+            continue
+        val = _float(row.get(val_col))
+        if val is None:
+            continue
+        d = parse_date(row.get(date_col), fmt) if date_col else None
+
+        if is_bmi:
+            if 10.0 <= val <= 80.0 and _better(pid, d, val):
+                best[pid] = (d, val)
+        else:
+            slot = hw.setdefault(pid, {})
+            key = "h" if is_h else "w"
+            prev = slot.get(key)
+            if prev is None or (d is not None and (prev[0] is None or d > prev[0])):
+                slot[key] = (d, val)
+
+    # Derive BMI only for people with no directly recorded value.
+    for pid, slot in hw.items():
+        if pid in best or "h" not in slot or "w" not in slot:
+            continue
+        bmi = derive_bmi(slot["h"][1], slot["w"][1])
+        if bmi is None:
+            continue
+        d = slot["w"][0] or slot["h"][0]
+        if _better(pid, d, bmi):
+            best[pid] = (d, bmi)
+
+    for pid, (d, v) in best.items():
+        out[pid] = (v, d)
+    return out
+
+
+def _read_bmi_wide(p: Path, schema: dict,
+                   index_dates: dict[str, date]
+                   ) -> dict[str, tuple[float | None, date | None]]:
+    """Wide-layout fallback: bmi (or height+weight) as their own columns."""
+    out: dict[str, tuple[float | None, date | None]] = {}
+    rows_by_pid: dict[str, list[tuple[date | None, float]]] = {}
     with p.open(newline="") as fh:
         rdr = csv.DictReader(fh, delimiter=schema.get("sep", "|"))
         cols = list(rdr.fieldnames or [])
@@ -263,7 +379,6 @@ def read_bmi(path: str | Path, schema: dict,
         w_col = _pick(cols, [schema.get("weight_col", "")] + _WEIGHT_CANDIDATES)
         date_col = schema.get("date_col")
         fmt = schema.get("date_format", "%m/%d/%Y")
-
         for row in rdr:
             pid = (row.get(pid_col) or "").strip()
             if not pid:
@@ -271,11 +386,10 @@ def read_bmi(path: str | Path, schema: dict,
             bmi = _float(row.get(bmi_col)) if bmi_col else None
             if bmi is None and h_col and w_col:
                 bmi = derive_bmi(_float(row.get(h_col)), _float(row.get(w_col)))
-            if bmi is None or not (10.0 <= bmi <= 80.0):   # drop implausible values
+            if bmi is None or not (10.0 <= bmi <= 80.0):
                 continue
             d = parse_date(row.get(date_col), fmt) if date_col else None
             rows_by_pid.setdefault(pid, []).append((d, bmi))
-
     for pid, rows in rows_by_pid.items():
         out[pid] = pick_measurement(rows, index_dates.get(pid))
     return out
@@ -298,35 +412,86 @@ def derive_bmi(height: float | None, weight: float | None) -> float | None:
 
 # --- OB history -------------------------------------------------------------
 
-def read_ob_history(path: str | Path, schema: dict
+def read_ob_history(path: str | Path, schema: dict,
+                    birth_years: dict[str, int] | None = None,
                     ) -> dict[str, tuple[int | None, float | None]]:
-    """{person_id -> (parity, age_at_first_birth)}; max parity observed."""
+    """{person_id -> (parity, age_at_first_birth)}.
+
+    The real OB_HISTORY extract is LONG — one row per pregnancy outcome
+    (`ob_hx_outcome_dt`, `ob_hx_outcome_c`) with no parity column. So:
+
+      parity              = number of qualifying outcome rows
+      age_at_first_birth  = year(earliest outcome date) - birth_year
+
+    `live_birth_codes` restricts which outcome codes count; when empty, every
+    outcome row counts, which over-counts parity if the file also records
+    miscarriages or terminations. That is why the config carries an explicit
+    TODO to confirm the code vocabulary — the fallback is deliberately visible
+    rather than silently wrong.
+
+    A wide layout with real parity / age columns is still honored if present.
+    """
     out: dict[str, tuple[int | None, float | None]] = {}
     p = Path(path)
     if not p.exists():
         return out
+    birth_years = birth_years or {}
+
     with p.open(newline="") as fh:
         rdr = csv.DictReader(fh, delimiter=schema.get("sep", "|"))
         cols = list(rdr.fieldnames or [])
         pid_col = schema.get("person_id_col", "sample_name")
         if pid_col not in cols:
             pid_col = _pick(cols, ["sample_name", "person_id"]) or (cols[0] if cols else "")
+
         par_col = _pick(cols, [schema.get("parity_col", "")] + _PARITY_CANDIDATES)
         afb_col = _pick(cols, [schema.get("age_at_first_birth_col", "")] + _AFB_CANDIDATES)
+        out_date_col = schema.get("outcome_date_col") or _pick(cols, ["ob_hx_outcome_dt"])
+        out_code_col = schema.get("outcome_code_col") or _pick(cols, ["ob_hx_outcome_c"])
+        live_codes = [str(c).strip().lower() for c in (schema.get("live_birth_codes") or [])]
+        fmt = schema.get("date_format", "%m/%d/%Y")
 
+        # Wide layout: explicit parity / AFB columns.
+        if par_col or afb_col:
+            for row in rdr:
+                pid = (row.get(pid_col) or "").strip()
+                if not pid:
+                    continue
+                par = _float(row.get(par_col)) if par_col else None
+                afb = _float(row.get(afb_col)) if afb_col else None
+                prev_par, prev_afb = out.get(pid, (None, None))
+                new_par = int(max(par, prev_par)) if par is not None and prev_par is not None \
+                    else (int(par) if par is not None else prev_par)
+                new_afb = min(afb, prev_afb) if afb is not None and prev_afb is not None \
+                    else (afb if afb is not None else prev_afb)
+                out[pid] = (new_par, new_afb)
+            return out
+
+        # Long layout: count outcome rows, track the earliest date.
+        counts: dict[str, int] = {}
+        first: dict[str, date] = {}
         for row in rdr:
             pid = (row.get(pid_col) or "").strip()
             if not pid:
                 continue
-            par = _float(row.get(par_col)) if par_col else None
-            afb = _float(row.get(afb_col)) if afb_col else None
-            prev_par, prev_afb = out.get(pid, (None, None))
-            # Parity is cumulative -> keep the max; AFB is fixed -> keep the min.
-            new_par = int(max(par, prev_par)) if par is not None and prev_par is not None \
-                else (int(par) if par is not None else prev_par)
-            new_afb = min(afb, prev_afb) if afb is not None and prev_afb is not None \
-                else (afb if afb is not None else prev_afb)
-            out[pid] = (new_par, new_afb)
+            if live_codes:
+                code = str(row.get(out_code_col) or "").strip().lower()
+                if code not in live_codes:
+                    continue
+            counts[pid] = counts.get(pid, 0) + 1
+            d = parse_date(row.get(out_date_col), fmt) if out_date_col else None
+            if d is not None and (pid not in first or d < first[pid]):
+                first[pid] = d
+
+        for pid, n in counts.items():
+            afb = None
+            by = birth_years.get(pid)
+            d = first.get(pid)
+            if by and d:
+                age = d.year - by
+                if 10 <= age <= 60:          # implausible -> leave missing
+                    afb = float(age)
+            out[pid] = (n, afb)
     return out
 
 

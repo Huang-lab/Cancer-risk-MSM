@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -69,6 +69,37 @@ def _paths(cfg: dict) -> dict[str, Path]:
     }
 
 
+_ID_LIKE = re.compile(r"SINAI[-_]|^\d+$|^\d{2}/\d{2}/\d{4}$|^\d{2}-[A-Z]{3}-\d{2}$")
+
+
+def looks_like_header(fields: list[str]) -> bool:
+    """True when `fields` are plausibly column names rather than a data row.
+
+    Some MSM extracts (Vitals) ship with no header, in which case csv.DictReader
+    hands back the first DATA row as fieldnames. Printing that would leak
+    participant values, so detect it and refuse.
+
+    A header is expected to be identifier-like: no participant-ID patterns, no
+    bare numbers, no dates, and mostly \\w/space characters.
+    """
+    if not fields:
+        return False
+    for f in fields:
+        s = (f or "").strip()
+        if not s or _ID_LIKE.search(s):
+            return False
+    # Headers are usually not majority-numeric and don't contain path/slash junk.
+    return sum(1 for f in fields if re.fullmatch(r"[\w .%()/-]+", f.strip())) == len(fields)
+
+
+def _safe_columns(fields: list[str]) -> tuple[list[str] | None, str]:
+    """Return (columns_or_None, note). Never returns data values."""
+    if looks_like_header(fields):
+        return fields, ""
+    return None, (f"NO HEADER DETECTED — {len(fields)} fields; values withheld "
+                  "(configure vitals.has_header/columns for positional access)")
+
+
 def inspect(cfg: dict) -> int:
     """Report file presence + schemas. No cell values are emitted."""
     paths = _paths(cfg)
@@ -98,9 +129,13 @@ def inspect(cfg: dict) -> int:
             continue
         with p.open(newline="") as fh:
             rdr = csv.DictReader(fh, delimiter=sep)
-            cols = list(rdr.fieldnames or [])
+            raw = list(rdr.fieldnames or [])
             n = sum(1 for _ in rdr)
-        print(f"  {key:22s} rows={n:<10,} cols={len(cols)}")
+        cols, note = _safe_columns(raw)
+        print(f"  {key:22s} rows={n:<12,} cols={len(raw)}")
+        if cols is None:
+            print(f"    {note}")
+            continue                      # do not echo a data row
         print(f"    {cols}")
         expected = schemas.get(key, {})
         missing = [v for k, v in expected.items()
@@ -189,7 +224,8 @@ def build(cfg: dict, out_dir: Path) -> int:
     social = cov.read_social_history(paths["social_history"], schemas["social_history"],
                                     coh.get("smoking_map", {}), coh.get("alcohol_map", {}))
     bmis = cov.read_bmi(paths["vitals"], schemas["vitals"])
-    obs = cov.read_ob_history(paths["ob_history"], schemas["ob_history"])
+    birth_years = {pid: r.birth_year for pid, r in covs.items() if r.birth_year}
+    obs = cov.read_ob_history(paths["ob_history"], schemas["ob_history"], birth_years)
     print(f"covariates: demographics={len(covs):,} social={len(social):,} "
           f"bmi={len(bmis):,} ob={len(obs):,}")
 

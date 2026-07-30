@@ -83,16 +83,21 @@ def normalize_cancer_type(raw: str) -> str | None:
 
 
 def _pick(cols: list[str], candidates: list[str]) -> str | None:
-    """Exact match first, then case-insensitive, then substring."""
+    """Exact match first, then case-insensitive, then substring.
+
+    Falsy candidates are dropped: an empty string would substring-match the
+    first column, since `"" in anything` is True.
+    """
+    cands = [c for c in candidates if c]
     lower = {c.lower(): c for c in cols}
-    for cand in candidates:
+    for cand in cands:
         if cand in cols:
             return cand
-        if cand in lower:
-            return lower[cand]
-    for cand in candidates:
+        if cand.lower() in lower:
+            return lower[cand.lower()]
+    for cand in cands:
         for c in cols:
-            if cand in c.lower():
+            if cand.lower() in c.lower():
                 return c
     return None
 
