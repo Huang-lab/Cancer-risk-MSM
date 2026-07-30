@@ -79,6 +79,37 @@ def is_cancer_phecode(code: str) -> bool:
     return bool(c) and c.startswith(_CANCER_PHECODE_PREFIXES)
 
 
+def people_with_cancer_codes(paths_and_schemas: list[tuple[Path, dict]],
+                             code_prefixes: set[str],
+                             prefix_len: int = 3) -> set[str]:
+    """Flag anyone whose ICD code matches a cancer code prefix.
+
+    Preferred over `people_with_cancer_icd`, which is limited to whatever the
+    built-in ICD->phecodeX map covers. `code_prefixes` comes from the case file
+    (see cancer_cases.load_cancer_code_prefixes) and therefore spans every
+    cancer category present in this cohort.
+    """
+    flagged: set[str] = set()
+    if not code_prefixes:
+        return flagged
+    for path, schema in paths_and_schemas:
+        if not Path(path).exists():
+            continue
+        sep = schema.get("sep", "|")
+        pid_col = schema["person_id_col"]
+        icd_col = schema["icd_col"]
+        with Path(path).open(newline="") as fh:
+            rdr = csv.DictReader(fh, delimiter=sep)
+            for row in rdr:
+                pid = (row.get(pid_col) or "").strip()
+                if not pid or pid in flagged:
+                    continue
+                code = (row.get(icd_col) or "").strip().upper().replace(" ", "")
+                if len(code) >= prefix_len and code[:prefix_len] in code_prefixes:
+                    flagged.add(pid)
+    return flagged
+
+
 def people_with_cancer_icd(paths_and_schemas: list[tuple[Path, dict]],
                            mapper: IcdToPhecodeX) -> set[str]:
     """Scan ICD-coded EHR tables for anyone with a malignancy code.

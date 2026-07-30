@@ -257,7 +257,59 @@ phenotype:
       date_format:       "%m/%d/%Y"
       sep:               "|"
 
+  # NOTE: `roster:` and `famhx:` below MUST stay nested under `phenotype:`.
+  # src/phenotype/{roster,cohort}.py read them as phenotype.roster /
+  # phenotype.famhx. The top-level `cohort:` section is deliberately placed
+  # AFTER them — inserting it above would terminate this mapping and silently
+  # reparent both blocks.
+  roster:
+    famhx_scope: any_cancer                 # any_cancer | cancer_specific
+    control_exclusion: any_cancer           # any_cancer | this_cancer_only
+    emit_prevalent_cases: true              # keep with incident_flag=false
+    min_control_encounters: 2
+  famhx:
+    relative_degrees: [1, 2]
+    cancer_free_text_patterns:
+      - "cancer"
+      - "malignant"
+      - "neoplasm"
+      - "carcinoma"
+      - "sarcoma"
+      - "leukemia"
+      - "leukaemia"
+      - "lymphoma"
+      - "melanoma"
+      - "myeloma"
+      - "tumor"
+      - "tumour"
+    # Free-text -> cancer-type classification (BioMe famhx has no codes).
+    # Keys align with the curated `Group` slugs from the cancer case file.
+    cancer_type_patterns:
+      colorectum:       ["colon", "colorectal", "rectal", "rectum"]
+      breast:           ["breast"]
+      prostate:         ["prostate"]
+      lung:             ["lung", "bronchus"]
+      ovary:            ["ovary", "ovarian"]
+      pancreas:         ["pancreas", "pancreatic"]
+      liver:            ["liver", "hepatocellular"]
+      stomach:          ["stomach", "gastric"]
+      leukemia:         ["leukemia", "leukaemia"]
+      lymphoma:         ["lymphoma"]
+      multiple_myeloma: ["myeloma"]
+      thyroid:          ["thyroid"]
+      kidney:           ["kidney", "renal"]
+      bladder:          ["bladder"]
+      endometrium:      ["endometrial", "endometrium"]
+      uterus:           ["uterine", "uterus"]
+      cervix:           ["cervix", "cervical"]
+      skin:             ["melanoma", "skin"]
+      brain:            ["brain", "glioma", "glioblastoma"]
+      esophagus:        ["esophag", "oesophag"]
+      head_and_neck:    ["head and neck", "throat", "larynx", "oral"]
+      testis:           ["testis", "testicular"]
+
 # --- Cohort assembly (case / control / famhx / lifestyle) --------------------
+# Top-level on purpose; see the note above about ordering.
 cohort:
   # Universe of people eligible to be controls. "demographics" is the biobank
   # roster; "union" pools every EHR source seen.
@@ -265,6 +317,12 @@ cohort:
   # Belt-and-braces: also screen ICD codes so someone with a cancer diagnosis
   # that is absent from the case file cannot land in the control group.
   screen_icd_for_cancer: true
+  # Where the cancer ICD code vocabulary comes from:
+  #   case_file -> distinct dx_code values in the cancer case file (RECOMMENDED;
+  #                self-calibrating and covers all 54 Group categories)
+  #   builtin   -> src/phenotype/icd_mapping.py, which only covers a handful of
+  #                cancers and therefore under-screens badly
+  cancer_code_source: case_file
   min_control_encounters: 0               # 0 disables the encounter-count filter
   # Lifestyle normalization, keyed to the ACTUAL MSM vocabularies.
   # Exact matches are tried across every bucket before any substring match, so
@@ -290,35 +348,6 @@ cohort:
     never:   ["no", "never", "none", "non-drinker"]
     former:  ["not currently", "former", "quit", "previous"]
     current: ["yes", "current", "occasional", "social", "moderate", "heavy", "daily"]
-
-  roster:
-    famhx_scope: any_cancer                 # any_cancer | cancer_specific
-    control_exclusion: any_cancer           # any_cancer | this_cancer_only
-    emit_prevalent_cases: true              # keep with incident_flag=false
-    min_control_encounters: 2
-  famhx:
-    relative_degrees: [1, 2]
-    cancer_free_text_patterns:
-      - "cancer"
-      - "malignant"
-      - "neoplasm"
-      - "carcinoma"
-      - "sarcoma"
-      - "leukemia"
-      - "leukaemia"
-      - "lymphoma"
-      - "melanoma"
-      - "myeloma"
-      - "tumor"
-      - "tumour"
-    # Free-text -> cancer-type classification (BioMe famhx has no codes).
-    cancer_type_patterns:
-      colorectal:  ["colon", "colorectal", "rectal", "rectum"]
-      breast:      ["breast"]
-      prostate:    ["prostate"]
-      lung:        ["lung", "bronchus"]
-      ovarian:     ["ovary", "ovarian"]
-      pancreatic:  ["pancreas", "pancreatic"]
 
 # --- Carrier consumption (NF output -> analysis features) -------------------
 carriers:

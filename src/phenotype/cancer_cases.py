@@ -246,6 +246,37 @@ def load_cancer_cases(path: str | Path, person_id_col: str = "sample_name",
     return cases, report
 
 
+def load_cancer_code_prefixes(path: str | Path, code_col: str = "dx_code",
+                              sep: str = "\t", prefix_len: int = 3) -> set[str]:
+    """Cancer ICD code prefixes taken from the case file itself.
+
+    The case file is already cancer-filtered and carries the diagnosis codes, so
+    its distinct `dx_code` values ARE the cancer vocabulary for this cohort --
+    all 54 Group categories, not just the handful the built-in ICD->phecodeX map
+    happens to cover. Screening controls with the built-in map misses ~45
+    categories (liver, leukemia, lymphoma, thyroid, ...), which lets people with
+    an undocumented cancer be admitted as "non-cancer" controls.
+
+    Truncating to a 3-character category ("C18.70" -> "C18") absorbs subcode
+    variation between the case file and the roster tables.
+    """
+    p = Path(path)
+    out: set[str] = set()
+    if not p.exists():
+        return out
+    with p.open(newline="") as fh:
+        rdr = csv.DictReader(fh, delimiter=sep)
+        cols = list(rdr.fieldnames or [])
+        col = _pick(cols, [code_col, "dx_code", "Code", "icd_code", "code"])
+        if col is None:
+            return out
+        for row in rdr:
+            code = (row.get(col) or "").strip().upper().replace(" ", "")
+            if len(code) >= prefix_len:
+                out.add(code[:prefix_len])
+    return out
+
+
 def cancer_types_present(cases: dict[str, CancerCase]) -> list[str]:
     seen: set[str] = set()
     for c in cases.values():

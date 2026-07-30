@@ -30,10 +30,12 @@ from src.phenotype.cancer_cases import (
     cancer_types_present,
     describe_schema,
     load_cancer_cases,
+    load_cancer_code_prefixes,
 )
 from src.phenotype.controls import (
     assign_groups,
     encounter_counts,
+    people_with_cancer_codes,
     people_with_cancer_icd,
     read_person_ids,
 )
@@ -145,7 +147,45 @@ def inspect(cfg: dict) -> int:
     return 0
 
 
+_REQUIRED_KEYS = [
+    ("inputs", "cancer_cases"),
+    ("inputs", "phenotypes"),
+    ("phenotype", "ehr_schema"),
+    ("phenotype", "famhx"),
+    ("phenotype", "cancer_phecodes"),
+]
+
+
+def validate_config(cfg: dict) -> list[str]:
+    """Return actionable messages for missing/mis-nested config keys.
+
+    YAML makes it easy to reparent a block by inserting a top-level section
+    above it, which surfaces later as a bare KeyError deep in the build. This
+    names the expected location instead.
+    """
+    problems: list[str] = []
+    for section, key in _REQUIRED_KEYS:
+        node = cfg.get(section)
+        if not isinstance(node, dict):
+            problems.append(f"config is missing the top-level `{section}:` section")
+            continue
+        if key not in node:
+            hint = ""
+            for other, onode in cfg.items():
+                if isinstance(onode, dict) and key in onode and other != section:
+                    hint = (f" — found `{key}:` under `{other}:` instead; it is "
+                            f"probably indented into the wrong parent")
+                    break
+            problems.append(f"config is missing `{section}.{key}`{hint}")
+    return problems
+
+
 def build(cfg: dict, out_dir: Path) -> int:
+    problems = validate_config(cfg)
+    if problems:
+        for p in problems:
+            print(f"CONFIG ERROR: {p}", file=sys.stderr)
+        return 2
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = _paths(cfg)
     schemas = cfg["phenotype"]["ehr_schema"]
@@ -183,10 +223,20 @@ def build(cfg: dict, out_dir: Path) -> int:
 
     icd_cancer: set[str] = set()
     if coh.get("screen_icd_for_cancer", True):
-        mapper = IcdToPhecodeX.load(cfg["phenotype"].get("icd_to_phecodex_map"))
-        icd_cancer = people_with_cancer_icd(
-            [(paths["encounter_diagnosis"], schemas["encounter_diagnosis"]),
-             (paths["problem_list"], schemas["problem_list"])], mapper)
+        dx_tables = [(paths["encounter_diagnosis"], schemas["encounter_diagnosis"]),
+                     (paths["problem_list"], schemas["problem_list"])]
+        if coh.get("cancer_code_source", "case_file") == "case_file":
+            prefixes = load_cancer_code_prefixes(
+                cc_cfg["path"], sep=cc_cfg.get("sep", "\t"))
+            print(f"cancer code prefixes from case file: {len(prefixes)}")
+            icd_cancer = people_with_cancer_codes(dx_tables, prefixes)
+        else:
+            # Built-in map covers only a few cancers; kept for completeness but
+            # it under-screens badly against a 50+ category case file.
+            mapper = IcdToPhecodeX.load(cfg["phenotype"].get("icd_to_phecodex_map"))
+            icd_cancer = people_with_cancer_icd(dx_tables, mapper)
+            print("WARNING: cancer_code_source=builtin under-screens; "
+                  "prefer case_file")
         print(f"people with a cancer ICD code: {len(icd_cancer):,}")
 
     enc_counts = {}
