@@ -274,6 +274,7 @@ def open_rows(path: Path, schema: dict):
 
 def read_bmi(path: str | Path, schema: dict,
              index_dates: dict[str, date] | None = None,
+             report: dict | None = None,
              ) -> dict[str, tuple[float | None, date | None]]:
     """{person_id -> (bmi, measurement_date)} from a LONG vitals table.
 
@@ -346,19 +347,44 @@ def read_bmi(path: str | Path, schema: dict,
             if prev is None or (d is not None and (prev[0] is None or d > prev[0])):
                 slot[key] = (d, val)
 
-    # Derive BMI only for people with no directly recorded value.
+    # Infer units from the cohort distribution, not per row. The real MSM Vitals
+    # extract has no BMI measure_type at all, so every value is derived and a
+    # unit misread would zero out the whole column.
+    h_vals = [s["h"][1] for s in hw.values() if "h" in s]
+    w_vals = [s["w"][1] for s in hw.values() if "w" in s]
+    h_unit = infer_height_unit(h_vals)
+    w_unit = infer_weight_unit(w_vals)
+
+    n_derived = 0
     for pid, slot in hw.items():
         if pid in best or "h" not in slot or "w" not in slot:
             continue
-        bmi = derive_bmi(slot["h"][1], slot["w"][1])
+        bmi = bmi_from(slot["h"][1], slot["w"][1], h_unit, w_unit)
         if bmi is None:
             continue
         d = slot["w"][0] or slot["h"][0]
         if _better(pid, d, bmi):
             best[pid] = (d, bmi)
+            n_derived += 1
 
     for pid, (d, v) in best.items():
         out[pid] = (v, d)
+
+    if report is not None:
+        bmi_vals = [v for v, _ in out.values() if v is not None]
+        report.update({
+            "height_unit_inferred": h_unit,
+            "weight_unit_inferred": w_unit,
+            "height_median_raw": _median(h_vals),
+            "weight_median_raw": _median(w_vals),
+            "n_people_with_height": len(h_vals),
+            "n_people_with_weight": len(w_vals),
+            "n_bmi_derived": n_derived,
+            "n_bmi_total": len(bmi_vals),
+            "bmi_median": _median(bmi_vals),
+            "bmi_min": min(bmi_vals) if bmi_vals else None,
+            "bmi_max": max(bmi_vals) if bmi_vals else None,
+        })
     return out
 
 
@@ -396,10 +422,11 @@ def _read_bmi_wide(p: Path, schema: dict,
 
 
 def derive_bmi(height: float | None, weight: float | None) -> float | None:
-    """BMI from height/weight, guessing units. cm+kg or in+lb.
+    """BMI from a single height/weight pair, guessing units per-row.
 
-    Returns None unless the result is physiologically plausible, so a unit
-    misread produces a missing value rather than a wrong number.
+    Kept for the wide-layout path. Prefer `bmi_from()` with cohort-inferred
+    units when many measurements are available -- per-row guessing cannot
+    distinguish pounds from ounces.
     """
     if not height or not weight or height <= 0:
         return None
@@ -407,6 +434,54 @@ def derive_bmi(height: float | None, weight: float | None) -> float | None:
         bmi = weight / ((height / 100.0) ** 2)
     else:                                 # inches + pounds
         bmi = (weight * 703.0) / (height ** 2)
+    return bmi if 10.0 <= bmi <= 80.0 else None
+
+
+def _median(vals: list[float]) -> float | None:
+    if not vals:
+        return None
+    s = sorted(vals)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def infer_height_unit(values: list[float]) -> str:
+    """'in' or 'cm', from the cohort median. Adult medians: ~66 in, ~168 cm."""
+    m = _median(values)
+    if m is None:
+        return "in"
+    return "cm" if m > 100 else "in"
+
+
+def infer_weight_unit(values: list[float]) -> str:
+    """'kg', 'lb' or 'oz', from the cohort median.
+
+    Adult medians: ~77 kg, ~170 lb, ~2,700 oz. Epic frequently stores weight in
+    ounces, which per-row guessing cannot separate from pounds -- and getting it
+    wrong makes every BMI implausible, so it silently becomes 100% missing
+    rather than obviously wrong. Inferring from the distribution and reporting
+    the choice is what keeps that visible.
+    """
+    m = _median(values)
+    if m is None:
+        return "lb"
+    if m > 800:
+        return "oz"
+    if m > 110:
+        return "lb"
+    return "kg"
+
+
+def bmi_from(height: float | None, weight: float | None,
+             height_unit: str, weight_unit: str) -> float | None:
+    """BMI with explicit units. Returns None when implausible."""
+    if not height or not weight or height <= 0:
+        return None
+    m = height / 100.0 if height_unit == "cm" else height * 0.0254
+    kg = {"kg": 1.0, "lb": 0.45359237, "oz": 0.028349523}.get(weight_unit, 1.0) * weight
+    if m <= 0:
+        return None
+    bmi = kg / (m ** 2)
     return bmi if 10.0 <= bmi <= 80.0 else None
 
 

@@ -155,7 +155,8 @@ def build(cfg: dict, out_dir: Path) -> int:
     # --- 1. Cancer cases (authoritative) ---
     cases, cc_report = load_cancer_cases(
         cc_cfg["path"], cc_cfg.get("person_id_col", "sample_name"),
-        cc_cfg.get("cancer_type_col"), cc_cfg.get("sep", "\t"))
+        cc_cfg.get("cancer_type_col"), cc_cfg.get("sep", "\t"),
+        cc_cfg.get("cancer_type_mode", "normalize"))
     print(f"cancer cases: {cc_report['n_people']:,} people "
           f"from {cc_report['n_rows']:,} rows")
     if cc_report["cancer_type_col"]:
@@ -223,9 +224,22 @@ def build(cfg: dict, out_dir: Path) -> int:
     covs = cov.read_demographics(paths["demographics"], demog_schema, as_of_year=as_of)
     social = cov.read_social_history(paths["social_history"], schemas["social_history"],
                                     coh.get("smoking_map", {}), coh.get("alcohol_map", {}))
-    bmis = cov.read_bmi(paths["vitals"], schemas["vitals"])
+    bmi_report: dict = {}
+    bmis = cov.read_bmi(paths["vitals"], schemas["vitals"], report=bmi_report)
     birth_years = {pid: r.birth_year for pid, r in covs.items() if r.birth_year}
     obs = cov.read_ob_history(paths["ob_history"], schemas["ob_history"], birth_years)
+
+    if bmi_report:
+        print(f"  BMI: units inferred height={bmi_report.get('height_unit_inferred')} "
+              f"(median raw {bmi_report.get('height_median_raw')}), "
+              f"weight={bmi_report.get('weight_unit_inferred')} "
+              f"(median raw {bmi_report.get('weight_median_raw')})")
+        bm = bmi_report.get("bmi_median")
+        print(f"       {bmi_report.get('n_bmi_total', 0):,} people with BMI "
+              f"(median {bm:.1f})" if bm else
+              f"       {bmi_report.get('n_bmi_total', 0):,} people with BMI")
+        if bm is not None and not (18.0 <= bm <= 35.0):
+            print("       WARNING: median BMI outside 18-35 — check the inferred units")
     print(f"covariates: demographics={len(covs):,} social={len(social):,} "
           f"bmi={len(bmis):,} ob={len(obs):,}")
 
@@ -297,6 +311,17 @@ def build(cfg: dict, out_dir: Path) -> int:
         fh.write("\n## Cancer types among cases\n\n| type | n rows |\n|---|---:|\n")
         for t, n in cc_report["types_seen"].items():
             fh.write(f"| {t} | {n:,} |\n")
+        if bmi_report:
+            fh.write("\n## BMI derivation\n\n")
+            fh.write("No `BMI` measure_type exists in Vitals, so every value is "
+                     "derived from Height + Weight with units inferred from the "
+                     "cohort medians.\n\n| field | value |\n|---|---|\n")
+            for k in ["height_unit_inferred", "height_median_raw",
+                      "weight_unit_inferred", "weight_median_raw",
+                      "n_people_with_height", "n_people_with_weight",
+                      "n_bmi_total", "bmi_median", "bmi_min", "bmi_max"]:
+                if k in bmi_report and bmi_report[k] is not None:
+                    fh.write(f"| {k} | {bmi_report[k]} |\n")
         if miss:
             fh.write("\n## Covariate missingness\n\n| covariate | fraction missing |\n|---|---:|\n")
             for k, v in sorted(miss.items(), key=lambda kv: -kv[1]):

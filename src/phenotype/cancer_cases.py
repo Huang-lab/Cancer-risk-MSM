@@ -70,7 +70,12 @@ class CancerCase:
 
 
 def normalize_cancer_type(raw: str) -> str | None:
-    """'Colon adenocarcinoma' -> 'colorectal'. None when unclassifiable."""
+    """'Colon adenocarcinoma' -> 'colorectal'. None when unclassifiable.
+
+    For free-text diagnosis names (`dx_name`). When the source has a curated
+    category column (`Group`), prefer `slugify_cancer_group` instead -- pattern
+    matching a curated vocabulary only loses information.
+    """
     if not raw:
         return None
     t = raw.strip().lower()
@@ -80,6 +85,36 @@ def normalize_cancer_type(raw: str) -> str | None:
         if any(p in t for p in pats):
             return key
     return None
+
+
+# Curated categories that carry no usable primary site. Kept as cases (the
+# person does have cancer) but excluded from per-site counts.
+_UNSPECIFIED_GROUPS = {
+    "cancer of unknown primary (cup)",
+    "other/ill-defined primary sites",
+    "hematologic/lymphatic - other/unspecified b-cell",
+}
+
+
+def slugify_cancer_group(raw: str) -> str | None:
+    """Curated `Group` value -> a stable key. 'Head & Neck' -> 'head_neck'.
+
+    Passthrough by design: the Group column is already a clean vocabulary
+    (Breast, Colorectum, Multiple Myeloma, ...), so it is slugified rather than
+    re-classified. Site-less buckets such as 'Cancer of Unknown Primary (CUP)'
+    return None so they do not become a spurious site, while the person still
+    counts as a case.
+    """
+    if not raw:
+        return None
+    t = raw.strip().lower()
+    if not t or t in ("na", "null", ".", "-", "unknown"):
+        return None
+    if t in _UNSPECIFIED_GROUPS:
+        return None
+    t = t.replace("&", " and ")
+    t = re.sub(r"[^a-z0-9]+", "_", t).strip("_")
+    return t or None
 
 
 def _pick(cols: list[str], candidates: list[str]) -> str | None:
@@ -127,7 +162,9 @@ def describe_schema(path: str | Path, sep: str = "\t") -> dict:
 
 def load_cancer_cases(path: str | Path, person_id_col: str = "sample_name",
                       cancer_type_col: str | None = None,
-                      sep: str = "\t") -> tuple[dict[str, CancerCase], dict]:
+                      sep: str = "\t",
+                      cancer_type_mode: str = "normalize",
+                      ) -> tuple[dict[str, CancerCase], dict]:
     """Return ({person_id -> CancerCase}, report).
 
     The report records the detected schema, unclassifiable type strings (as
@@ -185,7 +222,9 @@ def load_cancer_cases(path: str | Path, person_id_col: str = "sample_name",
                 raw = (row.get(type_col) or "").strip()
                 if raw:
                     rec.raw_types.add(raw)
-                    norm = normalize_cancer_type(raw)
+                    norm = (slugify_cancer_group(raw)
+                            if cancer_type_mode == "passthrough"
+                            else normalize_cancer_type(raw))
                     if norm:
                         rec.cancer_types.add(norm)
                         type_counts[norm] += 1

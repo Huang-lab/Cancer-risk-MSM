@@ -73,9 +73,12 @@ inputs:
   cancer_cases:
     path: /sc/arion/projects/rg_huangk06/variants_PLP_MSM/test/Cancers_ehr_genetics_combined_batch1.tsv
     person_id_col: "sample_name"
-    # Column naming the cancer type. null -> auto-detect from a candidate list
-    # (cancer, cancer_type, primary_site, phenotype, diagnosis, ...).
-    cancer_type_col: null
+    # `Group` is a curated cancer category (Breast, Colorectum, Multiple Myeloma,
+    # Prostate, ...) and is strictly better than the free-text `dx_name`.
+    cancer_type_col: "Group"
+    # passthrough -> slugify the curated value as-is; normalize -> pattern-match
+    # free text. Use passthrough for `Group`, normalize for `dx_name`.
+    cancer_type_mode: "passthrough"
     sep: "\t"
 
   phenotypes:
@@ -227,9 +230,12 @@ phenotype:
       measure_type_col: "measure_type"
       value_col:        "value"
       date_col:         "encounter_date"
-      # Values of measure_type to match (case-insensitive substring).
-      # TODO(user): confirm against the measure_type value counts.
-      bmi_labels:    ["BMI", "Body mass index"]
+      # measure_type values present: BP, Pulse, Temp, Resp, SpO2, Temp src,
+      # Weight (4.4M), Height (3.3M), Pain Score, Pain Loc.
+      # NOTE: there is NO BMI measure type, so every BMI is derived from
+      # Height + Weight. Units are inferred from the cohort medians and the
+      # inference is reported, because a misread would silently zero the column.
+      bmi_labels:    []                     # intentionally empty — none exist
       height_labels: ["Height"]
       weight_labels: ["Weight"]
       date_format:   "%m/%d/%Y"
@@ -240,9 +246,14 @@ phenotype:
       outcome_date_col:  "ob_hx_outcome_dt"
       outcome_code_col:  "ob_hx_outcome_c"
       # Parity = count of live-birth outcomes; age at first birth is derived
-      # from the earliest live-birth date minus birth_date.
-      # TODO(user): confirm which codes mean live birth from the value counts.
-      live_birth_codes:  []                 # empty -> count every outcome row
+      # from the earliest live-birth date minus birth year.
+      # ob_hx_outcome_c values: Term (13,316), Abortion (4,877), Para (4,134),
+      # Spontaneous Abortion (2,944), Gravida (2,674), Therapeutic Abortion
+      # (2,154), Preterm (1,590), Ectopic (425), Current (212), NA (7).
+      # Only Term + Preterm are live births. "Para" and "Gravida" are summary
+      # counts, not outcomes -- counting them would inflate parity; abortions,
+      # ectopics and current pregnancies are not births.
+      live_birth_codes:  ["Term", "Preterm"]
       date_format:       "%m/%d/%Y"
       sep:               "|"
 
@@ -255,15 +266,30 @@ cohort:
   # that is absent from the case file cannot land in the control group.
   screen_icd_for_cancer: true
   min_control_encounters: 0               # 0 disables the encounter-count filter
-  # Free-text/coded normalization for lifestyle fields.
+  # Lifestyle normalization, keyed to the ACTUAL MSM vocabularies.
+  # Exact matches are tried across every bucket before any substring match, so
+  # the `unknown` entries below win over a looser pattern in another bucket.
+  #
+  # TOBACCO_USER values: Never, Former, Never Smoker, Former Smoker, Every Day,
+  # Current Every Day Smoker, Never Assessed, Some Days, Current Some Day Smoker.
+  #
+  # "Never Assessed" (96,717 rows) means NOT ASKED, not a non-smoker. It
+  # contains the substring "never", so without an explicit unknown entry it
+  # would be scored as never-smoker and bias the exposure.
   smoking_map:
-    never:   ["never", "never smoker", "non-smoker", "nonsmoker", "0"]
+    unknown: ["never assessed", "not asked", "not assessed", "na", "unknown"]
+    never:   ["never", "never smoker", "non-smoker", "nonsmoker", "passive smoke exposure - never smoker"]
     former:  ["former", "former smoker", "quit", "ex-smoker", "previous"]
-    current: ["current", "current smoker", "every day", "some days", "yes", "smoker"]
+    current: ["every day", "some days", "current every day smoker",
+              "current some day smoker", "light tobacco smoker",
+              "heavy tobacco smoker", "smoker, current status unknown", "yes"]
+  # IS_ALCOHOL_USER values: No, Yes, Not Currently, NA, Not Asked, Never, blank.
+  # "Not Currently" is a FORMER drinker, not a never-drinker.
   alcohol_map:
-    never:   ["never", "no", "none", "non-drinker", "0"]
-    former:  ["former", "quit", "previous"]
-    current: ["current", "yes", "occasional", "social", "moderate", "heavy", "daily"]
+    unknown: ["na", "not asked", "not assessed", "unknown"]
+    never:   ["no", "never", "none", "non-drinker"]
+    former:  ["not currently", "former", "quit", "previous"]
+    current: ["yes", "current", "occasional", "social", "moderate", "heavy", "daily"]
 
   roster:
     famhx_scope: any_cancer                 # any_cancer | cancer_specific
